@@ -1,0 +1,11 @@
+{
+  "subtypes": [
+    {
+      "icon": "$media:layered_image",
+      "id": "MixedCantonese",
+      "label": "$string:mixed_keyboard_label",
+      "locale": "zh-HK",
+      "mode": "lower"
+    }
+  ]
+}
