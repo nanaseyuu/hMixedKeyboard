@@ -2,14 +2,16 @@
 
 Status legend: pending → in progress → done
 
-## 1. Expand symbols page, add 1/2 paging  — pending
+## 1. Expand symbols page, add 1/2 paging  — done
 The symbols (numeric) page has only ~18 symbols. Missing keys include
 `/ \ < > ^ % | [ ] { } ~ ` =`. Add them by introducing a second symbol page;
 in numeric mode the Shift key becomes a page switch labeled `1/2` / `2/2`.
+Page 2 now carries `[ ] { } < > / \ | ~ ^ ` = _` and common typographic keys.
+Verified on device.
 
-## 2. Key press feedback  — pending
+## 2. Key press feedback  — done
 Keys should show pressed feedback: background turns grey while a key is held
-(TouchType.Down), restored on Up/Cancel.
+(TouchType.Down), restored on Up/Cancel. Verified on device.
 
 ## 3. Voice typing via long-press of Space  — pending (feasibility TBD)
 Hold the space key to start voice input. Needs investigation whether this SDK
