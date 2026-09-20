@@ -11,6 +11,12 @@ const TAG: string = 'MixedController';
 const NON_ROW_VP: number = 86;
 const MIN_ROW_VP: number = 24;
 const MAX_ROW_VP: number = 46;
+// unfolded (bi-fold / tri-fold) screens get Celia-sized keys: measured Celia
+// runs ~320vp top-to-bottom on both unfolded panels at density 2.875, i.e.
+// ~57vp rows; the folded cover screen (short axis ~350vp) keeps the compact
+// MAX_ROW_VP sizing
+const EXPANDED_ROW_VP: number = 57;
+const EXPANDED_MIN_SHORT_AXIS_VP: number = 550;
 
 /**
  * Creates the soft-keyboard panel, talks to the input client and keeps the
@@ -69,14 +75,20 @@ class MixedController {
     const density: number = dis.densityPixels > 0 ? dis.densityPixels : 1;
     const isLandscape: boolean = dis.width > dis.height;
     const verticalVp: number = Math.floor(dis.height / density);
-    let budget: number = isLandscape
-      ? Math.min(0.5 * verticalVp, NON_ROW_VP + 4 * 30)
-      : Math.min(0.42 * verticalVp, NON_ROW_VP + 4 * MAX_ROW_VP);
-    let rowH: number = Math.floor((budget - NON_ROW_VP) / 4);
-    if (rowH < MIN_ROW_VP) {
-      rowH = MIN_ROW_VP;
-    } else if (rowH > MAX_ROW_VP) {
-      rowH = MAX_ROW_VP;
+    const shortAxisVp: number = Math.floor(Math.min(dis.width, dis.height) / density);
+    let rowH: number;
+    if (shortAxisVp >= EXPANDED_MIN_SHORT_AXIS_VP) {
+      rowH = EXPANDED_ROW_VP;
+    } else {
+      let budget: number = isLandscape
+        ? Math.min(0.5 * verticalVp, NON_ROW_VP + 4 * 30)
+        : Math.min(0.42 * verticalVp, NON_ROW_VP + 4 * MAX_ROW_VP);
+      rowH = Math.floor((budget - NON_ROW_VP) / 4);
+      if (rowH < MIN_ROW_VP) {
+        rowH = MIN_ROW_VP;
+      } else if (rowH > MAX_ROW_VP) {
+        rowH = MAX_ROW_VP;
+      }
     }
     this.rowHeight = rowH;
     this.panelWidth = Math.floor(dis.width / density);
