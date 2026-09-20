@@ -10,11 +10,15 @@
     },
     {
       "name": "EntryAbility_label",
-      "value": "label"
+      "value": "hMixedKeyboard"
     },
     {
       "name": "mixed_keyboard_label",
       "value": "hMixedKeyboard"
+    },
+    {
+      "name": "mic_reason",
+      "value": "Used for voice typing when holding the space bar on the keyboard"
     }
   ]
 }

@@ -2,10 +2,13 @@ import { inputMethodEngine, InputMethodExtensionContext } from '@kit.IMEKit';
 import { display } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import inputDevice from '@ohos.multimodalInput.inputDevice';
+import { speechRecognizer } from '@kit.CoreSpeechKit';
+import { audio } from '@kit.AudioKit';
 import { Cand, dictEngine, LookupResult } from './DictEngine';
 
 export type UiListener =
-  (composition: string, candidates: Cand[], predicting: boolean, shift: boolean, rowHeight: number) => void;
+  (composition: string, candidates: Cand[], predicting: boolean, shift: boolean, rowHeight: number,
+    voiceOn: boolean, voiceHint: string, collapsed: boolean, physicalMode: boolean) => void;
 
 const TAG: string = 'MixedController';
 // fixed chrome above/below the key rows: candidate bar + row gaps + padding
@@ -18,6 +21,13 @@ const MAX_ROW_VP: number = 46;
 // MAX_ROW_VP sizing
 const EXPANDED_ROW_VP: number = 57;
 const EXPANDED_MIN_SHORT_AXIS_VP: number = 550;
+// Physical keyboards (MatePad Edge share, Bluetooth/folio): the full panel
+// used to auto-hide on connect, which made the keyboard unrecoverable when
+// the shared mouse pointer leaves the screen. Policy now: collapse to a slim
+// candidate bar with a ^ restore arrow (tap ^ for the keys, ⌄ to collapse),
+// and auto re-show if the bar ever gets hidden while an editor is attached.
+const PHYSICAL_KB_PIN_ENABLED: boolean = true;
+const COLLAPSED_VP: number = 60;
 
 /**
  * Creates the soft-keyboard panel, talks to the input client and keeps the
@@ -44,10 +54,25 @@ class MixedController {
   private predicting: boolean = false;
   private shiftOn: boolean = false;
 
-  // physical keyboard policy: hide the soft keyboard while one is attached
+  // physical keyboard policy: pin the soft panel while a shared keyboard is attached
   private physicalKbActive: boolean = false;
-  private hiddenByPhysicalKb: boolean = false;
+  private kbExpanded: boolean = false;
+  private basePanelHeight: number = 270;
   private panelShown: boolean = false;
+
+  /** true = only the candidate bar should be shown (physical keyboard in use) */
+  public isCollapsed(): boolean {
+    return this.physicalKbActive && !this.kbExpanded;
+  }
+
+  // voice session (hold Space): on-device recognizer fed by AudioCapturer
+  private voiceEngine: speechRecognizer.SpeechRecognitionEngine | undefined = undefined;
+  private voiceCapturer: audio.AudioCapturer | undefined = undefined;
+  private voiceSessionId: string = '';
+  private voiceBuf: Uint8Array = new Uint8Array(0);
+  private voiceText: string = '';
+  private voiceOn: boolean = false;
+  private voiceHint: string = '';
 
   public onCreate(context: InputMethodExtensionContext): void {
     console.info(`${TAG} onCreate enter`);
@@ -60,13 +85,15 @@ class MixedController {
     }
     this.initWindow();
     this.registerListener();
-    this.registerDeviceListener();
-    this.scanPhysicalKeyboard().then((present: boolean) => {
-      this.physicalKbActive = present;
-      if (present) {
-        this.hideForPhysicalKb();
-      }
-    });
+    if (PHYSICAL_KB_PIN_ENABLED) {
+      this.registerDeviceListener();
+      this.scanPhysicalKeyboard().then((present: boolean) => {
+        this.physicalKbActive = present;
+        if (present) {
+          this.applyPanelSize();
+        }
+      });
+    }
     console.info(`${TAG} onCreate done`);
   }
 
@@ -105,15 +132,35 @@ class MixedController {
     }
     this.rowHeight = rowH;
     this.panelWidth = Math.floor(dis.width / density);
-    this.panelHeight = NON_ROW_VP + rowH * 4;
+    this.basePanelHeight = NON_ROW_VP + rowH * 4;
     // resize() is applied in PHYSICAL pixels, not vp: a resize(350, 270) for
     // 270vp produced a 270-px window (94vp) on a density-2.875 screen.
     this.densityPx = density;
     this.panelWidthPx = dis.width;
-    this.panelHeightPx = Math.round(this.panelHeight * density);
+    this.applyPanelSize();
     this.measuredHeight = 0;
     this.calibAttempts = 0;
     console.info(`${TAG} applyLayout: ${dis.width}x${dis.height} d${density} row ${rowH}vp panel ${this.panelWidth}x${this.panelHeight}vp (${this.panelWidthPx}x${this.panelHeightPx}px)`);
+  }
+
+  /**
+   * Effective window size: the full keyboard, or the slim COLLAPSED_VP
+   * candidate bar while a physical keyboard is attached.
+   */
+  private applyPanelSize(): void {
+    this.panelHeight = this.isCollapsed() ? COLLAPSED_VP : this.basePanelHeight;
+    this.panelHeightPx = Math.round(this.panelHeight * this.densityPx);
+    if (this.panel && this.panelShown) {
+      this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1);
+    }
+    this.notifyUi();
+  }
+
+  /** ^ / ⌄ tapped on the panel: switch between candidate bar and full keys. */
+  public onToggleCollapse(): void {
+    this.kbExpanded = !this.kbExpanded;
+    console.info(`${TAG} collapse toggle -> expanded=${this.kbExpanded}`);
+    this.applyPanelSize();
   }
 
   /**
@@ -125,6 +172,10 @@ class MixedController {
    */
   public onContentArea(heightVp: number): void {
     if (heightVp <= 0) {
+      return;
+    }
+    if (this.isCollapsed()) {
+      // collapsed bar: its height is fixed, no row fitting / calibration
       return;
     }
     this.measuredHeight = heightVp;
@@ -179,22 +230,18 @@ class MixedController {
             console.info(`${TAG} panel show event`);
             this.panelShown = true;
             this.calibAttempts = 0;
-            if (this.physicalKbActive) {
-              // the system re-shows the panel on focus: stay hidden while a
-              // physical keyboard is attached
-              kb.hide().then(() => {
-                this.hiddenByPhysicalKb = true;
-                console.info(`${TAG} re-hidden: physical keyboard active`);
-              }).catch((err: BusinessError) => {
-                console.error(`${TAG} re-hide: ${err.code}`);
-              });
-              return;
-            }
             this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1);
           });
           kb.on('hide', () => {
             console.info(`${TAG} panel hide event`);
             this.panelShown = false;
+            if (PHYSICAL_KB_PIN_ENABLED && this.physicalKbActive && this.inputClient) {
+              // editor still focused while a shared keyboard is attached: the
+              // user may have no pointer to bring the keyboard back — do it
+              setTimeout(() => {
+                this.ensureShown();
+              }, 600);
+            }
           });
           console.info(`${TAG} panel initial hide`);
           return this.panel.hide().then(() => {
@@ -241,9 +288,6 @@ class MixedController {
       this.kbController = kbController;
       this.inputClient = inputClient;
       this.resetComposition();
-      if (this.physicalKbActive) {
-        this.hideForPhysicalKb();
-      }
     });
     ability.on('inputStop', () => {
       console.info(`${TAG} inputStop`);
@@ -261,8 +305,8 @@ class MixedController {
   }
 
   /**
-   * Physical keyboard policy: while an external keyboard is attached the soft
-   * keyboard hides itself; when the last one disconnects it returns.
+   * Physical keyboard policy: an external keyboard attaching collapses the
+   * soft panel to the candidate bar; detaching restores the full keyboard.
    * inputDevice change events need no permission; getKeyboardTypeSync tells
    * real alphabetic/numeric keyboards apart from virtual inputs.
    */
@@ -284,21 +328,14 @@ class MixedController {
       }
       if (d.type === 'add') {
         this.physicalKbActive = true;
-        this.hideForPhysicalKb();
+        this.kbExpanded = false;
+        console.info(`${TAG} physical keyboard attached: collapsing to candidate bar`);
+        this.applyPanelSize();
       } else {
         this.scanPhysicalKeyboard().then((still: boolean) => {
           this.physicalKbActive = still;
-          if (!still && this.hiddenByPhysicalKb) {
-            this.hiddenByPhysicalKb = false;
-            const panel = this.panel;
-            if (panel && this.inputClient) {
-              panel.show().then(() => {
-                console.info(`${TAG} soft keyboard restored, no physical keyboard left`);
-              }).catch((err: BusinessError) => {
-                console.error(`${TAG} restore show: ${err.code}`);
-              });
-            }
-          }
+          this.kbExpanded = false;
+          this.applyPanelSize();
         });
       }
     });
@@ -326,29 +363,201 @@ class MixedController {
     });
   }
 
-  private hideForPhysicalKb(): void {
+  private ensureShown(): void {
     const panel = this.panel;
-    if (!panel) {
+    if (!panel || this.panelShown || !this.inputClient) {
       return;
     }
-    panel.hide().then(() => {
-      this.hiddenByPhysicalKb = true;
-      console.info(`${TAG} soft keyboard hidden for physical keyboard`);
+    panel.show().then(() => {
+      console.info(`${TAG} soft panel re-shown for shared keyboard`);
     }).catch((err: BusinessError) => {
-      console.error(`${TAG} hide for physical kb: ${err.code}`);
+      console.error(`${TAG} re-show failed: ${err.code}`);
     });
+  }
+
+  /**
+   * Voice typing (#3): hold Space to dictate. CoreSpeechKit runs on-device
+   * (online=1); AudioCapturer streams 16k mono S16 PCM in 1280-byte chunks.
+   * Releasing Space finishes and inserts the recognized text.
+   */
+  public onVoiceStart(): void {
+    if (this.voiceOn) {
+      return;
+    }
+    this.voiceHint = '';
+    this.voiceText = '';
+    this.voiceBuf = new Uint8Array(0);
+    if (this.composition.length > 0) {
+      this.resetComposition();
+    }
+    this.voiceOn = true;
+    this.notifyUi();
+    this.startVoiceCapture();
+  }
+
+  public onVoiceStop(): void {
+    if (!this.voiceOn) {
+      return;
+    }
+    this.voiceOn = false;
+    this.notifyUi();
+    this.stopCapturer();
+    try {
+      this.voiceEngine?.finish(this.voiceSessionId);
+    } catch (e) {
+      const be = e as BusinessError;
+      console.warn(`${TAG} voice finish: ${be.code}`);
+    }
+  }
+
+  private startVoiceCapture(): void {
+    const sid: string = `hmixed-${Date.now()}`;
+    this.voiceSessionId = sid;
+    let engineStep: Promise<void>;
+    if (this.voiceEngine) {
+      engineStep = Promise.resolve();
+    } else {
+      const ep: speechRecognizer.CreateEngineParams = { language: 'zh-CN', online: 1 };
+      engineStep = speechRecognizer.createEngine(ep).then((engine: speechRecognizer.SpeechRecognitionEngine) => {
+        this.voiceEngine = engine;
+        const listener: speechRecognizer.RecognitionListener = {
+          onStart: (s: string, m: string) => {
+            console.info(`${TAG} voice onStart ${s}`);
+          },
+          onEvent: (s: string, code: number, m: string) => {
+            console.info(`${TAG} voice onEvent ${code}`);
+          },
+          onResult: (s: string, r: speechRecognizer.SpeechRecognitionResult) => {
+            console.info(`${TAG} voice result: ${r.result}`);
+            if (r.result.length > 0) {
+              this.voiceText = r.result;
+            }
+          },
+          onComplete: (s: string, m: string) => {
+            this.voiceComplete();
+          },
+          onError: (s: string, code: number, msg: string) => {
+            console.error(`${TAG} voice onError ${code} ${msg}`);
+            this.voiceFail(`語音識別失敗 ${code}`);
+          }
+        };
+        engine.setListener(listener);
+      });
+    }
+    engineStep.then(() => {
+      const engine = this.voiceEngine;
+      if (!engine) {
+        throw new Error('voice engine missing') as Error;
+      }
+      const sp: speechRecognizer.StartParams = {
+        sessionId: sid,
+        audioInfo: { audioType: 'pcm', sampleRate: 16000, soundChannel: 1, sampleBit: 16 }
+      };
+      engine.startListening(sp);
+      return this.makeCapturer();
+    }).then((cap: audio.AudioCapturer) => {
+      this.voiceCapturer = cap;
+      return cap.start();
+    }).catch((err: BusinessError) => {
+      console.error(`${TAG} voice start failed: ${err.code} ${err.message}`);
+      // 201 = permission denied, 4401005/122 = mic not granted
+      if (err.code === 201 || err.code === 4401005 || err.code === 122) {
+        this.voiceFail('請先打開 hMixed App 授權麥克風');
+      } else {
+        this.voiceFail('無法啟動語音輸入');
+      }
+    });
+  }
+
+  private makeCapturer(): Promise<audio.AudioCapturer> {
+    const streamInfo: audio.AudioStreamInfo = {
+      samplingRate: audio.AudioSamplingRate.SAMPLE_RATE_16000,
+      channels: audio.AudioChannel.CHANNEL_1,
+      sampleFormat: audio.AudioSampleFormat.SAMPLE_FORMAT_S16LE,
+      encodingType: audio.AudioEncodingType.ENCODING_TYPE_RAW
+    };
+    const capturerInfo: audio.AudioCapturerInfo = {
+      source: audio.SourceType.SOURCE_TYPE_MIC,
+      capturerFlags: 0
+    };
+    const opts: audio.AudioCapturerOptions = {
+      streamInfo: streamInfo,
+      capturerInfo: capturerInfo
+    };
+    return audio.createAudioCapturer(opts).then((cap: audio.AudioCapturer) => {
+      cap.on('readData', (buff: ArrayBuffer) => {
+        this.feedVoice(buff);
+      });
+      return cap;
+    });
+  }
+
+  private feedVoice(buff: ArrayBuffer): void {
+    const engine = this.voiceEngine;
+    if (!engine || !this.voiceOn) {
+      return;
+    }
+    const incoming = new Uint8Array(buff);
+    const merged = new Uint8Array(this.voiceBuf.length + incoming.length);
+    merged.set(this.voiceBuf, 0);
+    merged.set(incoming, this.voiceBuf.length);
+    let off: number = 0;
+    while (merged.length - off >= 1280) {
+      try {
+        engine.writeAudio(this.voiceSessionId, merged.subarray(off, off + 1280));
+      } catch (e) {
+        const be = e as BusinessError;
+        console.error(`${TAG} writeAudio: ${be.code}`);
+        break;
+      }
+      off += 1280;
+    }
+    this.voiceBuf = merged.slice(off);
+  }
+
+  private voiceComplete(): void {
+    this.stopCapturer();
+    const text: string = this.voiceText;
+    console.info(`${TAG} voice complete: "${text}"`);
+    if (text.length > 0) {
+      this.commitText(text);
+    }
+  }
+
+  private voiceFail(hint: string): void {
+    this.stopCapturer();
+    try {
+      this.voiceEngine?.cancel(this.voiceSessionId);
+    } catch (e) {
+      // cancel of a not-started session is fine
+    }
+    this.voiceOn = false;
+    this.voiceHint = hint;
+    this.notifyUi();
+  }
+
+  private stopCapturer(): void {
+    const cap = this.voiceCapturer;
+    this.voiceCapturer = undefined;
+    if (cap) {
+      cap.stop().then(() => cap.release()).catch((e: BusinessError) => {
+        console.warn(`${TAG} capturer stop: ${e.code}`);
+      });
+    }
   }
 
   public setUiListener(listener: UiListener | undefined): void {
     this.uiListener = listener;
     if (listener) {
-      listener(this.composition, this.candidates, this.predicting, this.shiftOn, this.rowHeight);
+      listener(this.composition, this.candidates, this.predicting, this.shiftOn, this.rowHeight,
+        this.voiceOn, this.voiceHint, this.isCollapsed(), this.physicalKbActive);
     }
   }
 
   private notifyUi(): void {
     if (this.uiListener) {
-      this.uiListener(this.composition, this.candidates, this.predicting, this.shiftOn, this.rowHeight);
+      this.uiListener(this.composition, this.candidates, this.predicting, this.shiftOn, this.rowHeight,
+        this.voiceOn, this.voiceHint, this.isCollapsed(), this.physicalKbActive);
     }
   }
 

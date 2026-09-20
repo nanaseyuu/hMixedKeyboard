@@ -13,17 +13,22 @@ Verified on device.
 Keys should show pressed feedback: background turns grey while a key is held
 (TouchType.Down), restored on Up/Cancel. Verified on device.
 
-## 3. Voice typing via long-press of Space  — pending (feasibility TBD)
-Hold the space key to start voice input. Needs investigation whether this SDK
-exposes an on-device speech recognizer usable from a third-party IME
-(CoreSpeechKit / microphone permission in the IME process). If available,
-implement long-press detection on Space + mic capture + recognition.
+## 3. Voice typing via long-press of Space  — done
+Implemented: holding Space ~0.45s starts on-device dictation (CoreSpeechKit
+zh-CN, online=1) fed by a 16 kHz mono AudioCapturer; releasing Space finishes
+and inserts the recognized text. MICROPHONE is granted via the hMixed entry
+app (requestPermissionsFromUser; IME extensions cannot prompt). Caveat: the
+recognizer language is Mandarin zh-CN. Verified on device.
 
-## 4. Hide soft keyboard when a physical keyboard is connected  — implemented, needs on-device test with a real keyboard
-(feasibility TBD) When an external physical keyboard is attached, the soft
-keyboard should hide automatically (and return when detached). Implemented:
-inputDevice change events + getKeyboardTypeSync classification in
-MixedController (ALPHABETIC/DIGITAL keyboards only; panel re-hides on every
-system re-show while connected, restores when the last one disconnects).
-Deployed on the tablet; still needs a connect/disconnect cycle with a real
-Bluetooth/folio keyboard to verify.
+## 4. Physical keyboard behaviour — COLLAPSE mode  — done
+v1 auto-hid the soft panel when a physical keyboard connected; that made the
+keyboard unrecoverable while driving the tablet through the MatePad Edge
+keyboard/mouse share (pointer off-screen = no way back). v2 PIN mode kept the
+full panel pinned. Current policy (collapse): while a physical keyboard is
+attached the panel shrinks to a slim candidate bar (COLLAPSED_VP=60) with a ^
+restore arrow on the right — tap ^ for the full keys, ⌄ (shown in the bar when
+expanded) to collapse again. Auto re-show after ~600ms is kept as a safety
+net if the bar ever gets hidden while an editor is still attached. SDK
+caveat: third-party IMEs receive no physical keystrokes at this API level, so
+the bar shows candidates only for text typed through the soft panel; physical
+typing is handled directly by the system. Verified on device.

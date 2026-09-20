@@ -32,15 +32,27 @@ struct KeyboardIndex {
   @State shiftOn: boolean = false;
   @State rowHeight: number = 46;
   @State pressedKey: string = '';
+  @State voiceOn: boolean = false;
+  @State voiceHint: string = '';
+  @State collapsed: boolean = false;
+  @State physicalMode: boolean = false;
+
+  private voiceTimer: number = -1;
+  private voiceFired: boolean = false;
 
   aboutToAppear(): void {
     mixedController.setUiListener((comp: string, cands: Cand[], predicting: boolean,
-      shift: boolean, rowHeight: number) => {
+      shift: boolean, rowHeight: number, voiceOn: boolean, voiceHint: string,
+      collapsed: boolean, physicalMode: boolean) => {
       this.composition = comp;
       this.candidates = cands;
       this.predicting = predicting;
       this.shiftOn = shift;
       this.rowHeight = rowHeight;
+      this.voiceOn = voiceOn;
+      this.voiceHint = voiceHint;
+      this.collapsed = collapsed;
+      this.physicalMode = physicalMode;
     });
   }
 
@@ -89,6 +101,12 @@ struct KeyboardIndex {
   }
 
   private barLabel(): string {
+    if (this.voiceOn) {
+      return '🎤 聆聽中…';
+    }
+    if (this.voiceHint.length > 0) {
+      return this.voiceHint;
+    }
     if (this.predicting) {
       return '聯想';
     }
@@ -105,37 +123,90 @@ struct KeyboardIndex {
     return this.candidates.length > 0 ? 0 : -1;
   }
 
+  /** Label + candidate chips, shared by the full bar and the collapsed bar. */
+  @Builder
+  Chips() {
+    Row({ space: 4 }) {
+      Text(this.barLabel())
+        .fontSize(14)
+        .fontColor('#8A8F99')
+        .backgroundColor('#E2E5EB')
+        .borderRadius(6)
+        .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+        .margin({ right: 4 })
+      ForEach(this.candidates, (cand: Cand, index: number) => {
+        Text(cand.text)
+          .fontSize(22)
+          .fontColor(cand.simplified ? '#5B6472' : FG_TEXT)
+          .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+          .borderRadius(6)
+          .backgroundColor(!this.predicting && index === this.commitIndex() ? '#DCE4F7' : Color.Transparent)
+          .onClick(() => {
+            mixedController.chooseCandidate(index);
+          })
+      }, (cand: Cand, index: number) => `${index}_${cand.text}`)
+    }
+    .padding({ left: 8, right: 8 })
+    .alignItems(VerticalAlign.Center)
+  }
+
+  /** ^ when collapsed (restore keys) / ⌄ when expanded (collapse to bar). */
+  @Builder
+  CollapseButton(symbol: string) {
+    Text(symbol)
+      .fontSize(18)
+      .fontColor(FG_TEXT)
+      .textAlign(TextAlign.Center)
+      .backgroundColor(this.keyBg(BG_FUNC, 'collapse'))
+      .borderRadius(6)
+      .width(44)
+      .height(36)
+      .margin({ right: 6 })
+      .onTouch((e: TouchEvent) => {
+        this.onPress('collapse', e);
+      })
+      .onClick(() => {
+        mixedController.onToggleCollapse();
+      })
+  }
+
   @Builder
   CandidateBar() {
-    Scroll() {
-      Row({ space: 4 }) {
-        Text(this.barLabel())
-          .fontSize(14)
-          .fontColor('#8A8F99')
-          .backgroundColor('#E2E5EB')
-          .borderRadius(6)
-          .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-          .margin({ right: 4 })
-        ForEach(this.candidates, (cand: Cand, index: number) => {
-          Text(cand.text)
-            .fontSize(22)
-            .fontColor(cand.simplified ? '#5B6472' : FG_TEXT)
-            .padding({ left: 10, right: 10, top: 4, bottom: 4 })
-            .borderRadius(6)
-            .backgroundColor(!this.predicting && index === this.commitIndex() ? '#DCE4F7' : Color.Transparent)
-            .onClick(() => {
-              mixedController.chooseCandidate(index);
-            })
-        }, (cand: Cand, index: number) => `${index}_${cand.text}`)
+    Row() {
+      Scroll() {
+        this.Chips()
       }
-      .padding({ left: 8, right: 8 })
-      .alignItems(VerticalAlign.Center)
+      .scrollable(ScrollDirection.Horizontal)
+      .scrollBar(BarState.Off)
+      .layoutWeight(1)
+      .height('100%')
+      if (this.physicalMode) {
+        this.CollapseButton('⌄')
+      }
     }
-    .scrollable(ScrollDirection.Horizontal)
-    .scrollBar(BarState.Off)
     .width('100%')
     .height(48)
     .backgroundColor(BG_BAR)
+    .alignItems(VerticalAlign.Center)
+  }
+
+  /** Slim bar while a physical keyboard is attached: chips + ^ restore. */
+  @Builder
+  CollapsedBar() {
+    Row() {
+      Scroll() {
+        this.Chips()
+      }
+      .scrollable(ScrollDirection.Horizontal)
+      .scrollBar(BarState.Off)
+      .layoutWeight(1)
+      .height('100%')
+      this.CollapseButton('^')
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(BG_BAR)
+    .alignItems(VerticalAlign.Center)
   }
 
   @Builder
@@ -225,9 +296,9 @@ struct KeyboardIndex {
 
   @Builder
   SpaceKey() {
-    Text('空白')
+    Text(this.voiceOn ? '🎤 放開結束' : '空白')
       .fontSize(20)
-      .fontColor(FG_TEXT)
+      .fontColor(this.voiceOn ? '#2B5FBF' : FG_TEXT)
       .textAlign(TextAlign.Center)
       .backgroundColor(this.keyBg(BG_KEY, 'space'))
       .borderRadius(8)
@@ -236,8 +307,27 @@ struct KeyboardIndex {
       .margin(3)
       .onTouch((e: TouchEvent) => {
         this.onPress('space', e);
+        if (e.type === TouchType.Down) {
+          this.voiceFired = false;
+          this.voiceTimer = setTimeout(() => {
+            this.voiceFired = true;
+            mixedController.onVoiceStart();
+          }, 450);
+        } else if (e.type === TouchType.Up || e.type === TouchType.Cancel) {
+          if (this.voiceTimer !== -1) {
+            clearTimeout(this.voiceTimer);
+            this.voiceTimer = -1;
+          }
+          if (this.voiceFired) {
+            mixedController.onVoiceStop();
+          }
+        }
       })
       .onClick(() => {
+        if (this.voiceFired) {
+          this.voiceFired = false;
+          return;
+        }
         mixedController.onSpace();
       })
   }
@@ -307,22 +397,26 @@ struct KeyboardIndex {
 
   build() {
     Column() {
-      this.CandidateBar()
-      Column({ space: 2 }) {
-        this.LetterRows()
-        Row({ space: 2 }) {
-          this.ModeKey()
-          this.PuncKey('，')
-          this.SpaceKey()
-          this.PuncKey('。')
-          this.EnterKey()
+      if (this.collapsed) {
+        this.CollapsedBar()
+      } else {
+        this.CandidateBar()
+        Column({ space: 2 }) {
+          this.LetterRows()
+          Row({ space: 2 }) {
+            this.ModeKey()
+            this.PuncKey('，')
+            this.SpaceKey()
+            this.PuncKey('。')
+            this.EnterKey()
+          }
         }
+        .padding({ left: 4, right: 4, top: 2, bottom: 6 })
       }
-      .padding({ left: 4, right: 4, top: 2, bottom: 6 })
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(BG_PANEL)
+    .backgroundColor(this.collapsed ? BG_BAR : BG_PANEL)
     .alignItems(HorizontalAlign.Start)
     .onAreaChange((_oldValue: Area, newValue: Area) => {
       const h: number = Number(newValue.height);
