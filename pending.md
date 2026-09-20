@@ -19,9 +19,11 @@ exposes an on-device speech recognizer usable from a third-party IME
 (CoreSpeechKit / microphone permission in the IME process). If available,
 implement long-press detection on Space + mic capture + recognition.
 
-## 4. Hide soft keyboard when a physical keyboard is connected  — pending
+## 4. Hide soft keyboard when a physical keyboard is connected  — implemented, needs on-device test with a real keyboard
 (feasibility TBD) When an external physical keyboard is attached, the soft
-keyboard should hide automatically (and return when detached). Needs a
-physical-keyboard source in this SDK: check `@ohos.multimodalInput.inputDevice`
-(`KeyboardType.PHYSICAL`, add/remove events) accessibility from the IME
-panel process and its permission requirements.
+keyboard should hide automatically (and return when detached). Implemented:
+inputDevice change events + getKeyboardTypeSync classification in
+MixedController (ALPHABETIC/DIGITAL keyboards only; panel re-hides on every
+system re-show while connected, restores when the last one disconnects).
+Deployed on the tablet; still needs a connect/disconnect cycle with a real
+Bluetooth/folio keyboard to verify.

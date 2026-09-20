@@ -1,6 +1,7 @@
 import { inputMethodEngine, InputMethodExtensionContext } from '@kit.IMEKit';
 import { display } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
+import inputDevice from '@ohos.multimodalInput.inputDevice';
 import { Cand, dictEngine, LookupResult } from './DictEngine';
 
 export type UiListener =
@@ -43,6 +44,11 @@ class MixedController {
   private predicting: boolean = false;
   private shiftOn: boolean = false;
 
+  // physical keyboard policy: hide the soft keyboard while one is attached
+  private physicalKbActive: boolean = false;
+  private hiddenByPhysicalKb: boolean = false;
+  private panelShown: boolean = false;
+
   public onCreate(context: InputMethodExtensionContext): void {
     console.info(`${TAG} onCreate enter`);
     this.context = context;
@@ -54,6 +60,13 @@ class MixedController {
     }
     this.initWindow();
     this.registerListener();
+    this.registerDeviceListener();
+    this.scanPhysicalKeyboard().then((present: boolean) => {
+      this.physicalKbActive = present;
+      if (present) {
+        this.hideForPhysicalKb();
+      }
+    });
     console.info(`${TAG} onCreate done`);
   }
 
@@ -158,13 +171,30 @@ class MixedController {
       })
       .then(() => {
         if (this.panel) {
+          const kb: inputMethodEngine.Panel = this.panel;
           // the panel window only becomes resizable once it exists; the system
           // may also consider a freshly created panel "already shown", so hide
           // it first, size it, and let the system show it on demand
-          this.panel.on('show', () => {
+          kb.on('show', () => {
             console.info(`${TAG} panel show event`);
+            this.panelShown = true;
             this.calibAttempts = 0;
+            if (this.physicalKbActive) {
+              // the system re-shows the panel on focus: stay hidden while a
+              // physical keyboard is attached
+              kb.hide().then(() => {
+                this.hiddenByPhysicalKb = true;
+                console.info(`${TAG} re-hidden: physical keyboard active`);
+              }).catch((err: BusinessError) => {
+                console.error(`${TAG} re-hide: ${err.code}`);
+              });
+              return;
+            }
             this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1);
+          });
+          kb.on('hide', () => {
+            console.info(`${TAG} panel hide event`);
+            this.panelShown = false;
           });
           console.info(`${TAG} panel initial hide`);
           return this.panel.hide().then(() => {
@@ -211,6 +241,9 @@ class MixedController {
       this.kbController = kbController;
       this.inputClient = inputClient;
       this.resetComposition();
+      if (this.physicalKbActive) {
+        this.hideForPhysicalKb();
+      }
     });
     ability.on('inputStop', () => {
       console.info(`${TAG} inputStop`);
@@ -224,6 +257,85 @@ class MixedController {
         });
       }
       this.notifyUi();
+    });
+  }
+
+  /**
+   * Physical keyboard policy: while an external keyboard is attached the soft
+   * keyboard hides itself; when the last one disconnects it returns.
+   * inputDevice change events need no permission; getKeyboardTypeSync tells
+   * real alphabetic/numeric keyboards apart from virtual inputs.
+   */
+  private registerDeviceListener(): void {
+    inputDevice.on('change', (d: inputDevice.DeviceListener) => {
+      let kbType: number = -1;
+      try {
+        kbType = inputDevice.getKeyboardTypeSync(d.deviceId);
+      } catch (e) {
+        const be = e as BusinessError;
+        console.warn(`${TAG} device ${d.deviceId} kb type unavailable: ${be.code}`);
+        return;
+      }
+      const physical: boolean = kbType === inputDevice.KeyboardType.ALPHABETIC_KEYBOARD
+        || kbType === inputDevice.KeyboardType.DIGITAL_KEYBOARD;
+      console.info(`${TAG} device ${d.type} id=${d.deviceId} kbType=${kbType} physical=${physical}`);
+      if (!physical) {
+        return;
+      }
+      if (d.type === 'add') {
+        this.physicalKbActive = true;
+        this.hideForPhysicalKb();
+      } else {
+        this.scanPhysicalKeyboard().then((still: boolean) => {
+          this.physicalKbActive = still;
+          if (!still && this.hiddenByPhysicalKb) {
+            this.hiddenByPhysicalKb = false;
+            const panel = this.panel;
+            if (panel && this.inputClient) {
+              panel.show().then(() => {
+                console.info(`${TAG} soft keyboard restored, no physical keyboard left`);
+              }).catch((err: BusinessError) => {
+                console.error(`${TAG} restore show: ${err.code}`);
+              });
+            }
+          }
+        });
+      }
+    });
+  }
+
+  private scanPhysicalKeyboard(): Promise<boolean> {
+    return inputDevice.getDeviceList().then((ids: number[]) => {
+      let count: number = 0;
+      for (let i = 0; i < ids.length; i++) {
+        try {
+          const kt: number = inputDevice.getKeyboardTypeSync(ids[i]);
+          if (kt === inputDevice.KeyboardType.ALPHABETIC_KEYBOARD
+            || kt === inputDevice.KeyboardType.DIGITAL_KEYBOARD) {
+            count++;
+          }
+        } catch (e) {
+          // device vanished between listing and query
+        }
+      }
+      console.info(`${TAG} scanPhysicalKeyboard: ${count} physical keyboard(s)`);
+      return count > 0;
+    }).catch((err: BusinessError) => {
+      console.error(`${TAG} getDeviceList failed: ${err.code}`);
+      return false;
+    });
+  }
+
+  private hideForPhysicalKb(): void {
+    const panel = this.panel;
+    if (!panel) {
+      return;
+    }
+    panel.hide().then(() => {
+      this.hiddenByPhysicalKb = true;
+      console.info(`${TAG} soft keyboard hidden for physical keyboard`);
+    }).catch((err: BusinessError) => {
+      console.error(`${TAG} hide for physical kb: ${err.code}`);
     });
   }
 
