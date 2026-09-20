@@ -21,6 +21,13 @@ const MAX_ROW_VP: number = 46;
 // MAX_ROW_VP sizing
 const EXPANDED_ROW_VP: number = 57;
 const EXPANDED_MIN_SHORT_AXIS_VP: number = 550;
+// Celia metrics measured on the MatePad Pro (2880x1920px, density 2): the
+// keyboard occupies the bottom 768px (384vp) — candidate bar 96px (48vp),
+// four 138px (68vp) key rows at 156px pitch (10vp gaps), and a 66px (33vp)
+// bottom pad that keeps the space key clear of the system gesture pill (y1864).
+const CELIA_CHROME_VP: number = 112; // 48 bar + 3 row gaps + 34 bottom pad
+const CELIA_ROW_VP: number = 68;
+const CELIA_PORTRAIT_RATE: number = 0.40;
 // Physical keyboards (MatePad Edge share, Bluetooth/folio): the full panel
 // used to auto-hide on connect, which made the keyboard unrecoverable when
 // the shared mouse pointer leaves the screen. Policy now: collapse to a slim
@@ -53,6 +60,13 @@ class MixedController {
   private candidates: Cand[] = [];
   private predicting: boolean = false;
   private shiftOn: boolean = false;
+
+  // large (tablet / unfolded) screens render with the Celia geometry
+  private expandedScreen: boolean = false;
+
+  public isExpandedScreen(): boolean {
+    return this.expandedScreen;
+  }
 
   // physical keyboard policy: pin the soft panel while a shared keyboard is attached
   private physicalKbActive: boolean = false;
@@ -116,9 +130,20 @@ class MixedController {
     const isLandscape: boolean = dis.width > dis.height;
     const verticalVp: number = Math.floor(dis.height / density);
     const shortAxisVp: number = Math.floor(Math.min(dis.width, dis.height) / density);
+    this.expandedScreen = shortAxisVp >= EXPANDED_MIN_SHORT_AXIS_VP;
+    let chrome: number = NON_ROW_VP;
     let rowH: number;
-    if (shortAxisVp >= EXPANDED_MIN_SHORT_AXIS_VP) {
-      rowH = EXPANDED_ROW_VP;
+    if (this.expandedScreen) {
+      // exact Celia geometry (see CELIA_* constants above)
+      chrome = CELIA_CHROME_VP;
+      if (isLandscape) {
+        rowH = CELIA_ROW_VP;
+      } else {
+        rowH = Math.floor((Math.floor(CELIA_PORTRAIT_RATE * verticalVp) - chrome) / 4);
+        if (rowH < 40) {
+          rowH = 40;
+        }
+      }
     } else {
       let budget: number = isLandscape
         ? Math.min(0.5 * verticalVp, NON_ROW_VP + 4 * 30)
@@ -132,7 +157,7 @@ class MixedController {
     }
     this.rowHeight = rowH;
     this.panelWidth = Math.floor(dis.width / density);
-    this.basePanelHeight = NON_ROW_VP + rowH * 4;
+    this.basePanelHeight = chrome + rowH * 4;
     // resize() is applied in PHYSICAL pixels, not vp: a resize(350, 270) for
     // 270vp produced a 270-px window (94vp) on a density-2.875 screen.
     this.densityPx = density;
@@ -179,16 +204,19 @@ class MixedController {
       return;
     }
     this.measuredHeight = heightVp;
-    let rowH: number = Math.floor((heightVp - NON_ROW_VP) / 4);
-    if (rowH < MIN_ROW_VP) {
-      rowH = MIN_ROW_VP;
-    } else if (rowH > MAX_ROW_VP) {
-      rowH = MAX_ROW_VP;
+    if (!this.expandedScreen) {
+      // phone layouts: fit rows to whatever window the system actually gave us
+      let rowH: number = Math.floor((heightVp - NON_ROW_VP) / 4);
+      if (rowH < MIN_ROW_VP) {
+        rowH = MIN_ROW_VP;
+      } else if (rowH > MAX_ROW_VP) {
+        rowH = MAX_ROW_VP;
+      }
+      if (rowH !== this.rowHeight) {
+        this.rowHeight = rowH;
+      }
     }
-    if (rowH !== this.rowHeight) {
-      this.rowHeight = rowH;
-    }
-    console.info(`${TAG} onContentArea measured ${heightVp}vp row ${rowH}vp`);
+    console.info(`${TAG} onContentArea measured ${heightVp}vp row ${this.rowHeight}vp`);
     this.notifyUi();
     if (this.panel && this.calibAttempts < 2 && Math.abs(heightVp - this.panelHeight) > 8) {
       this.calibAttempts++;

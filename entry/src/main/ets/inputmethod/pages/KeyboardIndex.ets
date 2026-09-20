@@ -36,11 +36,13 @@ struct KeyboardIndex {
   @State voiceHint: string = '';
   @State collapsed: boolean = false;
   @State physicalMode: boolean = false;
+  @State expandedScreen: boolean = false;
 
   private voiceTimer: number = -1;
   private voiceFired: boolean = false;
 
   aboutToAppear(): void {
+    this.expandedScreen = mixedController.isExpandedScreen();
     mixedController.setUiListener((comp: string, cands: Cand[], predicting: boolean,
       shift: boolean, rowHeight: number, voiceOn: boolean, voiceHint: string,
       collapsed: boolean, physicalMode: boolean) => {
@@ -219,7 +221,7 @@ struct KeyboardIndex {
       .borderRadius(8)
       .layoutWeight(1)
       .height(this.rowHeight)
-      .margin(3)
+      .margin(this.expandedScreen ? 0 : 3)
       .onTouch((e: TouchEvent) => {
         this.onPress(`${this.rowTag()}_${ch}`, e);
       })
@@ -240,9 +242,9 @@ struct KeyboardIndex {
       .textAlign(TextAlign.Center)
       .backgroundColor(this.keyBg(this.numericMode ? BG_FUNC_ON : (this.shiftOn ? BG_FUNC_ON : BG_FUNC), 'shift'))
       .borderRadius(8)
-      .layoutWeight(1.2)
+      .layoutWeight(this.expandedScreen ? 1.35 : 1.2)
       .height(this.rowHeight)
-      .margin(3)
+      .margin(this.expandedScreen ? 0 : 3)
       .onTouch((e: TouchEvent) => {
         this.onPress('shift', e);
       })
@@ -263,9 +265,9 @@ struct KeyboardIndex {
       .textAlign(TextAlign.Center)
       .backgroundColor(this.keyBg(BG_FUNC, 'back'))
       .borderRadius(8)
-      .layoutWeight(1.2)
+      .layoutWeight(this.expandedScreen ? 1.55 : 1.2)
       .height(this.rowHeight)
-      .margin(3)
+      .margin(this.expandedScreen ? 0 : 3)
       .onTouch((e: TouchEvent) => {
         this.onPress('back', e);
       })
@@ -282,9 +284,9 @@ struct KeyboardIndex {
       .textAlign(TextAlign.Center)
       .backgroundColor(this.keyBg(BG_FUNC, 'mode'))
       .borderRadius(8)
-      .layoutWeight(1.5)
+      .layoutWeight(this.expandedScreen ? 1 : 1.5)
       .height(this.rowHeight)
-      .margin(3)
+      .margin(this.expandedScreen ? 0 : 3)
       .onTouch((e: TouchEvent) => {
         this.onPress('mode', e);
       })
@@ -302,9 +304,9 @@ struct KeyboardIndex {
       .textAlign(TextAlign.Center)
       .backgroundColor(this.keyBg(BG_KEY, 'space'))
       .borderRadius(8)
-      .layoutWeight(5)
+      .layoutWeight(this.expandedScreen ? 6 : 5)
       .height(this.rowHeight)
-      .margin(3)
+      .margin(this.expandedScreen ? 0 : 3)
       .onTouch((e: TouchEvent) => {
         this.onPress('space', e);
         if (e.type === TouchType.Down) {
@@ -340,9 +342,9 @@ struct KeyboardIndex {
       .textAlign(TextAlign.Center)
       .backgroundColor(this.keyBg(BG_FUNC, 'enter'))
       .borderRadius(8)
-      .layoutWeight(1.5)
+      .layoutWeight(this.expandedScreen ? 1 : 1.5)
       .height(this.rowHeight)
-      .margin(3)
+      .margin(this.expandedScreen ? 0 : 3)
       .onTouch((e: TouchEvent) => {
         this.onPress('enter', e);
       })
@@ -361,7 +363,7 @@ struct KeyboardIndex {
       .borderRadius(8)
       .layoutWeight(1)
       .height(this.rowHeight)
-      .margin(3)
+      .margin(this.expandedScreen ? 0 : 3)
       .onTouch((e: TouchEvent) => {
         this.onPress(`p_${ch}`, e);
       })
@@ -372,20 +374,25 @@ struct KeyboardIndex {
 
   @Builder
   LetterRows() {
-    Column({ space: 2 }) {
-      Row({ space: 2 }) {
+    Column({ space: this.expandedScreen ? 10 : 2 }) {
+      Row({ space: this.expandedScreen ? 10 : 2 }) {
         ForEach(this.row1(), (ch: string, index: number) => {
           this.LetterKey(ch, this.numericMode)
         }, (ch: string, index: number) => `${this.rowTag()}_${index}_${ch}`)
       }
-      Row({ space: 2 }) {
-        Blank().layoutWeight(0.5)
+      Row({ space: this.expandedScreen ? 10 : 2 }) {
+        if (!this.expandedScreen) {
+          Blank().layoutWeight(0.5)
+        }
         ForEach(this.row2(), (ch: string, index: number) => {
           this.LetterKey(ch, this.numericMode)
         }, (ch: string, index: number) => `${this.rowTag()}_${index}_${ch}`)
-        Blank().layoutWeight(0.5)
+        if (!this.expandedScreen) {
+          Blank().layoutWeight(0.5)
+        }
       }
-      Row({ space: 2 }) {
+      .padding(this.expandedScreen ? { left: 70, right: 70 } : { left: 0, right: 0 })
+      Row({ space: this.expandedScreen ? 10 : 2 }) {
         this.ShiftKey()
         ForEach(this.row3(), (ch: string, index: number) => {
           this.LetterKey(ch, this.numericMode)
@@ -401,9 +408,9 @@ struct KeyboardIndex {
         this.CollapsedBar()
       } else {
         this.CandidateBar()
-        Column({ space: 2 }) {
+        Column({ space: this.expandedScreen ? 10 : 2 }) {
           this.LetterRows()
-          Row({ space: 2 }) {
+          Row({ space: this.expandedScreen ? 10 : 2 }) {
             this.ModeKey()
             this.PuncKey('，')
             this.SpaceKey()
@@ -411,7 +418,8 @@ struct KeyboardIndex {
             this.EnterKey()
           }
         }
-        .padding({ left: 4, right: 4, top: 2, bottom: 6 })
+        .padding(this.expandedScreen ? { left: 24, right: 24, top: 0, bottom: 34 }
+          : { left: 4, right: 4, top: 2, bottom: 6 })
       }
     }
     .width('100%')
