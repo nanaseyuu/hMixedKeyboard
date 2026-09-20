@@ -12,6 +12,7 @@ const BG_PANEL: string = '#E4E7EC';
 const BG_BAR: string = '#F7F8FA';
 const BG_KEY: string = '#FFFFFF';
 const BG_FUNC: string = '#C9CEDA';
+const BG_FUNC_ON: string = '#B8C6E8';
 const FG_TEXT: string = '#1A1C1E';
 
 @Entry
@@ -21,12 +22,17 @@ struct KeyboardIndex {
   @State candidates: Cand[] = [];
   @State predicting: boolean = false;
   @State numericMode: boolean = false;
+  @State shiftOn: boolean = false;
+  @State rowHeight: number = 46;
 
   aboutToAppear(): void {
-    mixedController.setUiListener((comp: string, cands: Cand[], predicting: boolean) => {
+    mixedController.setUiListener((comp: string, cands: Cand[], predicting: boolean,
+      shift: boolean, rowHeight: number) => {
       this.composition = comp;
       this.candidates = cands;
       this.predicting = predicting;
+      this.shiftOn = shift;
+      this.rowHeight = rowHeight;
     });
   }
 
@@ -39,6 +45,16 @@ struct KeyboardIndex {
       return '聯想';
     }
     return this.composition.length > 0 ? this.composition : 'hMixed';
+  }
+
+  /** Index of the candidate that Space would commit (first non-raw, else raw). */
+  private commitIndex(): number {
+    for (let i = 0; i < this.candidates.length; i++) {
+      if (!this.candidates[i].isRaw) {
+        return i;
+      }
+    }
+    return this.candidates.length > 0 ? 0 : -1;
   }
 
   @Builder
@@ -58,7 +74,7 @@ struct KeyboardIndex {
             .fontColor(cand.simplified ? '#5B6472' : FG_TEXT)
             .padding({ left: 10, right: 10, top: 4, bottom: 4 })
             .borderRadius(6)
-            .backgroundColor(index === 0 && !this.predicting ? '#DCE4F7' : Color.Transparent)
+            .backgroundColor(!this.predicting && index === this.commitIndex() ? '#DCE4F7' : Color.Transparent)
             .onClick(() => {
               mixedController.chooseCandidate(index);
             })
@@ -75,18 +91,120 @@ struct KeyboardIndex {
   }
 
   @Builder
-  KeyCap(label: string, weight: number, bg: string, onTap: (ch: string) => void) {
-    Text(label)
+  LetterKey(ch: string, num: boolean) {
+    Text(num ? ch : (this.shiftOn ? ch.toUpperCase() : ch))
       .fontSize(20)
       .fontColor(FG_TEXT)
       .textAlign(TextAlign.Center)
-      .backgroundColor(bg)
+      .backgroundColor(BG_KEY)
       .borderRadius(8)
-      .layoutWeight(weight)
-      .height(46)
+      .layoutWeight(1)
+      .height(this.rowHeight)
       .margin(3)
       .onClick(() => {
-        onTap(label);
+        if (num) {
+          mixedController.onNumeric(ch);
+        } else {
+          mixedController.onChar(ch);
+        }
+      })
+  }
+
+  @Builder
+  ShiftKey() {
+    Text(this.shiftOn ? '⇪' : '⇧')
+      .fontSize(20)
+      .fontColor(FG_TEXT)
+      .textAlign(TextAlign.Center)
+      .backgroundColor(this.shiftOn ? BG_FUNC_ON : BG_FUNC)
+      .borderRadius(8)
+      .layoutWeight(1.2)
+      .height(this.rowHeight)
+      .margin(3)
+      .onClick(() => {
+        if (!this.numericMode) {
+          mixedController.onShift();
+        }
+      })
+  }
+
+  @Builder
+  BackKey() {
+    Text('⌫')
+      .fontSize(20)
+      .fontColor(FG_TEXT)
+      .textAlign(TextAlign.Center)
+      .backgroundColor(BG_FUNC)
+      .borderRadius(8)
+      .layoutWeight(1.2)
+      .height(this.rowHeight)
+      .margin(3)
+      .onClick(() => {
+        mixedController.onBackspace();
+      })
+  }
+
+  @Builder
+  ModeKey() {
+    Text(this.numericMode ? 'abc' : '?123')
+      .fontSize(20)
+      .fontColor(FG_TEXT)
+      .textAlign(TextAlign.Center)
+      .backgroundColor(BG_FUNC)
+      .borderRadius(8)
+      .layoutWeight(1.5)
+      .height(this.rowHeight)
+      .margin(3)
+      .onClick(() => {
+        this.numericMode = !this.numericMode;
+      })
+  }
+
+  @Builder
+  SpaceKey() {
+    Text('空白')
+      .fontSize(20)
+      .fontColor(FG_TEXT)
+      .textAlign(TextAlign.Center)
+      .backgroundColor(BG_KEY)
+      .borderRadius(8)
+      .layoutWeight(5)
+      .height(this.rowHeight)
+      .margin(3)
+      .onClick(() => {
+        mixedController.onSpace();
+      })
+  }
+
+  @Builder
+  EnterKey() {
+    Text('⏎')
+      .fontSize(20)
+      .fontColor(FG_TEXT)
+      .textAlign(TextAlign.Center)
+      .backgroundColor(BG_FUNC)
+      .borderRadius(8)
+      .layoutWeight(1.5)
+      .height(this.rowHeight)
+      .margin(3)
+      .onClick(() => {
+        mixedController.onEnter();
+      })
+  }
+
+  @Builder
+  PuncKey(ch: string) {
+    Text(ch)
+      .fontSize(20)
+      .fontColor(FG_TEXT)
+      .textAlign(TextAlign.Center)
+      .backgroundColor(BG_KEY)
+      .borderRadius(8)
+      .layoutWeight(1)
+      .height(this.rowHeight)
+      .margin(3)
+      .onClick(() => {
+        mixedController.onPunctuation(ch);
       })
   }
 
@@ -94,38 +212,24 @@ struct KeyboardIndex {
   LetterRows() {
     Column({ space: 2 }) {
       Row({ space: 2 }) {
-        ForEach(this.numericMode ? NUM_ROW_1 : LETTER_ROW_1, (ch: string) => {
-          this.KeyCap(ch, 1, BG_KEY, (c: string): void => {
-            this.onKeyTap(c);
-          })
-        }, (ch: string) => ch)
+        ForEach(this.numericMode ? NUM_ROW_1 : LETTER_ROW_1, (ch: string, index: number) => {
+          this.LetterKey(ch, this.numericMode)
+        }, (ch: string, index: number) => `${this.numericMode ? 'n' : 'l'}_${index}_${ch}`)
       }
       Row({ space: 2 }) {
         Blank().layoutWeight(0.5)
-        ForEach(this.numericMode ? NUM_ROW_2 : LETTER_ROW_2, (ch: string) => {
-          this.KeyCap(ch, 1, BG_KEY, (c: string): void => {
-            this.onKeyTap(c);
-          })
-        }, (ch: string) => ch)
+        ForEach(this.numericMode ? NUM_ROW_2 : LETTER_ROW_2, (ch: string, index: number) => {
+          this.LetterKey(ch, this.numericMode)
+        }, (ch: string, index: number) => `${this.numericMode ? 'n' : 'l'}_${index}_${ch}`)
         Blank().layoutWeight(0.5)
       }
       Row({ space: 2 }) {
-        Blank().layoutWeight(1)
-        ForEach(this.numericMode ? NUM_ROW_3 : LETTER_ROW_3, (ch: string) => {
-          this.KeyCap(ch, 1, BG_KEY, (c: string): void => {
-            this.onKeyTap(c);
-          })
-        }, (ch: string) => ch)
-        Blank().layoutWeight(1)
+        this.ShiftKey()
+        ForEach(this.numericMode ? NUM_ROW_3 : LETTER_ROW_3, (ch: string, index: number) => {
+          this.LetterKey(ch, this.numericMode)
+        }, (ch: string, index: number) => `${this.numericMode ? 'n' : 'l'}_${index}_${ch}`)
+        this.BackKey()
       }
-    }
-  }
-
-  private onKeyTap(ch: string): void {
-    if (this.numericMode) {
-      mixedController.onNumeric(ch);
-    } else {
-      mixedController.onChar(ch);
     }
   }
 
@@ -135,24 +239,11 @@ struct KeyboardIndex {
       Column({ space: 2 }) {
         this.LetterRows()
         Row({ space: 2 }) {
-          this.KeyCap(this.numericMode ? 'abc' : '?123', 1.5, BG_FUNC, (): void => {
-            this.numericMode = !this.numericMode;
-          })
-          this.KeyCap('，', 1, BG_KEY, (c: string): void => {
-            mixedController.onPunctuation(c);
-          })
-          this.KeyCap('空白', 4, BG_KEY, (): void => {
-            mixedController.onSpace();
-          })
-          this.KeyCap('。', 1, BG_KEY, (): void => {
-            mixedController.onPunctuation('。');
-          })
-          this.KeyCap('⏎', 1.5, BG_FUNC, (): void => {
-            mixedController.onEnter();
-          })
-          this.KeyCap('⌫', 1.5, BG_FUNC, (): void => {
-            mixedController.onBackspace();
-          })
+          this.ModeKey()
+          this.PuncKey('，')
+          this.SpaceKey()
+          this.PuncKey('。')
+          this.EnterKey()
         }
       }
       .padding({ left: 4, right: 4, top: 2, bottom: 6 })
@@ -161,5 +252,11 @@ struct KeyboardIndex {
     .height('100%')
     .backgroundColor(BG_PANEL)
     .alignItems(HorizontalAlign.Start)
+    .onAreaChange((_oldValue: Area, newValue: Area) => {
+      const h: number = Number(newValue.height);
+      if (h > 0) {
+        mixedController.onContentArea(h);
+      }
+    })
   }
 }

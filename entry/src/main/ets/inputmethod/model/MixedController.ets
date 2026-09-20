@@ -3,11 +3,14 @@ import { display } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Cand, dictEngine, LookupResult } from './DictEngine';
 
-export type UiListener = (composition: string, candidates: Cand[], predicting: boolean) => void;
+export type UiListener =
+  (composition: string, candidates: Cand[], predicting: boolean, shift: boolean, rowHeight: number) => void;
 
 const TAG: string = 'MixedController';
-const KEYBOARD_HEIGHT_RATE_PORTRAIT: number = 0.42;
-const KEYBOARD_HEIGHT_RATE_LANDSCAPE: number = 0.5;
+// fixed chrome above/below the key rows: candidate bar + row gaps + padding
+const NON_ROW_VP: number = 86;
+const MIN_ROW_VP: number = 24;
+const MAX_ROW_VP: number = 46;
 
 /**
  * Creates the soft-keyboard panel, talks to the input client and keeps the
@@ -21,10 +24,18 @@ class MixedController {
   private uiListener: UiListener | undefined;
   private panelWidth: number = 0;
   private panelHeight: number = 0;
+  private panelWidthPx: number = 0;
+  private panelHeightPx: number = 0;
+  private densityPx: number = 1;
+  private rowHeight: number = 46;
+  private measuredHeight: number = 0;
+  private calibAttempts: number = 0;
 
   private composition: string = '';
+  private baseCands: Cand[] = [];
   private candidates: Cand[] = [];
   private predicting: boolean = false;
+  private shiftOn: boolean = false;
 
   public onCreate(context: InputMethodExtensionContext): void {
     console.info(`${TAG} onCreate enter`);
@@ -49,21 +60,77 @@ class MixedController {
     }
   }
 
+  /**
+   * Derive row height from the available screen so that panelHeight always
+   * equals the real content height (no blank area below the keys).
+   */
+  private applyLayout(): void {
+    const dis = display.getDefaultDisplaySync();
+    const density: number = dis.densityPixels > 0 ? dis.densityPixels : 1;
+    const isLandscape: boolean = dis.width > dis.height;
+    const verticalVp: number = Math.floor(dis.height / density);
+    let budget: number = isLandscape
+      ? Math.min(0.5 * verticalVp, NON_ROW_VP + 4 * 30)
+      : Math.min(0.42 * verticalVp, NON_ROW_VP + 4 * MAX_ROW_VP);
+    let rowH: number = Math.floor((budget - NON_ROW_VP) / 4);
+    if (rowH < MIN_ROW_VP) {
+      rowH = MIN_ROW_VP;
+    } else if (rowH > MAX_ROW_VP) {
+      rowH = MAX_ROW_VP;
+    }
+    this.rowHeight = rowH;
+    this.panelWidth = Math.floor(dis.width / density);
+    this.panelHeight = NON_ROW_VP + rowH * 4;
+    // resize() is applied in PHYSICAL pixels, not vp: a resize(350, 270) for
+    // 270vp produced a 270-px window (94vp) on a density-2.875 screen.
+    this.densityPx = density;
+    this.panelWidthPx = dis.width;
+    this.panelHeightPx = Math.round(this.panelHeight * density);
+    this.measuredHeight = 0;
+    this.calibAttempts = 0;
+    console.info(`${TAG} applyLayout: ${dis.width}x${dis.height} d${density} row ${rowH}vp panel ${this.panelWidth}x${this.panelHeight}vp (${this.panelWidthPx}x${this.panelHeightPx}px)`);
+  }
+
+  /**
+   * The keyboard page reports its real rendered height here. Row height is
+   * fitted to whatever window the system actually gave us (so rows can never
+   * be clipped), and if that window is smaller than requested we re-resize
+   * once with a height scaled by the wanted/got ratio (covers unit or clamp
+   * differences between our request and the window manager's interpretation).
+   */
+  public onContentArea(heightVp: number): void {
+    if (heightVp <= 0) {
+      return;
+    }
+    this.measuredHeight = heightVp;
+    let rowH: number = Math.floor((heightVp - NON_ROW_VP) / 4);
+    if (rowH < MIN_ROW_VP) {
+      rowH = MIN_ROW_VP;
+    } else if (rowH > MAX_ROW_VP) {
+      rowH = MAX_ROW_VP;
+    }
+    if (rowH !== this.rowHeight) {
+      this.rowHeight = rowH;
+    }
+    console.info(`${TAG} onContentArea measured ${heightVp}vp row ${rowH}vp`);
+    this.notifyUi();
+    if (this.panel && this.calibAttempts < 2 && Math.abs(heightVp - this.panelHeight) > 8) {
+      this.calibAttempts++;
+      let corrected: number = this.panelHeightPx;
+      if (heightVp < this.panelHeight) {
+        corrected = Math.round(this.panelHeightPx * (this.panelHeight / heightVp));
+      }
+      console.info(`${TAG} calibrating resize: ${this.panelHeightPx} -> ${corrected}`);
+      this.resizeWithRetry(this.panelWidthPx, corrected, 1);
+    }
+  }
+
   private initWindow(): void {
     if (!this.context) {
       console.error(`${TAG} initWindow: no context`);
       return;
     }
-    const dis = display.getDefaultDisplaySync();
-    const isLandscape = dis.width > dis.height;
-    // the panel resize API validates sizes against the display in vp units
-    const density = dis.densityPixels > 0 ? dis.densityPixels : 1;
-    const widthVp = Math.floor(dis.width / density);
-    const keyHeightVp = Math.floor((isLandscape ? dis.width : dis.height) *
-      (isLandscape ? KEYBOARD_HEIGHT_RATE_LANDSCAPE : KEYBOARD_HEIGHT_RATE_PORTRAIT) / density);
-    this.panelWidth = widthVp;
-    this.panelHeight = keyHeightVp;
-    console.info(`${TAG} initWindow: display ${dis.width}x${dis.height}, density ${density}, panel ${widthVp}x${keyHeightVp}vp`);
+    this.applyLayout();
     const panelInfo: inputMethodEngine.PanelInfo = {
       type: inputMethodEngine.PanelType.SOFT_KEYBOARD,
       flag: inputMethodEngine.PanelFlag.FLG_FIXED
@@ -84,15 +151,16 @@ class MixedController {
           // it first, size it, and let the system show it on demand
           this.panel.on('show', () => {
             console.info(`${TAG} panel show event`);
-            this.resizeWithRetry(this.panelWidth, this.panelHeight, 1);
+            this.calibAttempts = 0;
+            this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1);
           });
           console.info(`${TAG} panel initial hide`);
           return this.panel.hide().then(() => {
             console.info(`${TAG} panel hidden, resizing`);
-            return this.resizeWithRetry(this.panelWidth, this.panelHeight, 1);
+            return this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1);
           }).catch((err: BusinessError) => {
             console.error(`${TAG} panel hide failed: code ${err.code}`);
-            return this.resizeWithRetry(this.panelWidth, this.panelHeight, 1);
+            return this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1);
           });
         }
         return Promise.resolve();
@@ -127,48 +195,69 @@ class MixedController {
     const ability = inputMethodEngine.getInputMethodAbility();
     ability.on('inputStart', (kbController: inputMethodEngine.KeyboardController,
       inputClient: inputMethodEngine.InputClient) => {
+      console.info(`${TAG} inputStart`);
       this.kbController = kbController;
       this.inputClient = inputClient;
       this.resetComposition();
     });
     ability.on('inputStop', () => {
+      console.info(`${TAG} inputStop`);
       this.resetComposition();
     });
     display.on('change', () => {
-      this.resizePanel();
+      this.applyLayout();
+      if (this.panel) {
+        this.panel.resize(this.panelWidthPx, this.panelHeightPx).catch((err: BusinessError) => {
+          console.error(`${TAG} resizePanel: ${err.code} ${err.message}`);
+        });
+      }
+      this.notifyUi();
     });
-  }
-
-  private resizePanel(): void {
-    const dis = display.getDefaultDisplaySync();
-    const isLandscape = dis.width > dis.height;
-    const keyHeight = Math.floor((isLandscape ? dis.width : dis.height) *
-      (isLandscape ? KEYBOARD_HEIGHT_RATE_LANDSCAPE : KEYBOARD_HEIGHT_RATE_PORTRAIT));
-    if (this.panel) {
-      this.panel.resize(dis.width, keyHeight).catch((err: BusinessError) => {
-        console.error(`${TAG} resizePanel: ${err.code} ${err.message}`);
-      });
-    }
   }
 
   public setUiListener(listener: UiListener | undefined): void {
     this.uiListener = listener;
     if (listener) {
-      listener(this.composition, this.candidates, this.predicting);
+      listener(this.composition, this.candidates, this.predicting, this.shiftOn, this.rowHeight);
     }
   }
 
   private notifyUi(): void {
     if (this.uiListener) {
-      this.uiListener(this.composition, this.candidates, this.predicting);
+      this.uiListener(this.composition, this.candidates, this.predicting, this.shiftOn, this.rowHeight);
     }
   }
 
   private resetComposition(): void {
     this.composition = '';
+    this.baseCands = [];
     this.candidates = [];
     this.predicting = false;
+    this.shiftOn = false;
     this.notifyUi();
+  }
+
+  /** The typed letters themselves, offered as the first (English) candidate. */
+  private rawCand(): Cand {
+    const cand = new Cand();
+    cand.isRaw = true;
+    if (this.shiftOn && this.composition.length > 0) {
+      cand.text = this.composition.charAt(0).toUpperCase() + this.composition.substring(1);
+    } else {
+      cand.text = this.composition;
+    }
+    return cand;
+  }
+
+  private rebuildComposing(): void {
+    this.candidates = [];
+    if (this.composition.length === 0) {
+      return;
+    }
+    this.candidates.push(this.rawCand());
+    for (const cand of this.baseCands) {
+      this.candidates.push(cand);
+    }
   }
 
   /** A letter key was pressed: extend the composition and look up candidates. */
@@ -176,7 +265,8 @@ class MixedController {
     this.predicting = false;
     this.composition += ch;
     const result: LookupResult = dictEngine.lookup(this.composition);
-    this.candidates = result.exact.concat(result.suggest);
+    this.baseCands = result.exact.concat(result.suggest);
+    this.rebuildComposing();
     this.notifyUi();
   }
 
@@ -184,14 +274,26 @@ class MixedController {
     this.commitText(ch);
   }
 
-  /** Space: commit the first candidate, else commit the raw code, else type a space. */
+  public onShift(): void {
+    this.shiftOn = !this.shiftOn;
+    if (this.composition.length > 0 && !this.predicting) {
+      this.rebuildComposing();
+    }
+    this.notifyUi();
+  }
+
+  /** Space: commit the first dictionary candidate, else the raw code, else a space. */
   public onSpace(): void {
-    if (this.candidates.length > 0) {
-      this.commitCandidate(this.candidates[0]);
+    if (this.composition.length > 0) {
+      if (this.baseCands.length > 0) {
+        this.commitText(this.baseCands[0].text);
+      } else {
+        this.commitText(this.rawCand().text);
+      }
       return;
     }
-    if (this.composition.length > 0) {
-      this.commitText(this.composition);
+    if (this.predicting && this.candidates.length > 0) {
+      this.commitText(this.candidates[0].text);
       return;
     }
     this.commitText(' ');
@@ -200,58 +302,106 @@ class MixedController {
   /** Enter: commit what is typed as plain letters. */
   public onEnter(): void {
     if (this.composition.length > 0) {
-      this.commitText(this.composition);
+      this.commitText(this.rawCand().text);
       return;
     }
     this.commitText('\n');
   }
 
-  /** Backspace: shorten the composition, else delete in the client. */
+  /**
+   * Backspace: shorten the composition while typing; otherwise always delete
+   * in the client (and drop any related-word suggestions).
+   */
   public onBackspace(): void {
+    console.info(`${TAG} onBackspace comp=${this.composition} predicting=${this.predicting} hasClient=${this.inputClient !== undefined}`);
     if (this.composition.length > 0) {
       this.composition = this.composition.substring(0, this.composition.length - 1);
       if (this.composition.length === 0) {
-        this.resetComposition();
-        return;
+        this.baseCands = [];
+        this.candidates = [];
+        this.predicting = false;
+      } else {
+        const result: LookupResult = dictEngine.lookup(this.composition);
+        this.baseCands = result.exact.concat(result.suggest);
+        this.rebuildComposing();
       }
-      const result: LookupResult = dictEngine.lookup(this.composition);
-      this.candidates = result.exact.concat(result.suggest);
       this.notifyUi();
       return;
     }
-    if (this.inputClient) {
-      this.inputClient.deleteBackward(1).catch((err: BusinessError) => {
-        console.error(`${TAG} deleteBackward: ${err.code} ${err.message}`);
-      });
+    this.predicting = false;
+    this.candidates = [];
+    const client = this.inputClient;
+    if (client) {
+      try {
+        const idx: number = client.getTextIndexAtCursorSync();
+        const bwd: string = client.getBackwardSync(20);
+        const fwd: string = client.getForwardSync(10000);
+        console.info(`${TAG} probe idx=${idx} bwd="${bwd}" fwdLen=${fwd.length} fwd="${fwd.substring(0, 12)}"`);
+        if (bwd.length > 0) {
+          client.deleteBackwardSync(1);
+          console.info(`${TAG} deleteBackwardSync ok`);
+        } else if (fwd.length > 0) {
+          // this editor reports the cursor at index 0 while text exists after
+          // it, so delete-before-cursor is a silent no-op; delete the LAST
+          // character by selecting it and sending CUT instead
+          const range: inputMethodEngine.Range = { start: fwd.length - 1, end: fwd.length };
+          client.selectByRangeSync(range);
+          client.sendExtendAction(inputMethodEngine.ExtendAction.CUT).then(() => {
+            console.info(`${TAG} selection CUT sent (idx ${fwd.length - 1})`);
+          }).catch((err: BusinessError) => {
+            console.error(`${TAG} CUT: ${err.code} ${err.message}`);
+          });
+        } else {
+          client.deleteBackward(1).then((done: boolean) => {
+            console.info(`${TAG} deleteBackward -> ${done} (empty-editor path)`);
+          }).catch((err: BusinessError) => {
+            console.error(`${TAG} deleteBackward: ${err.code} ${err.message}`);
+          });
+        }
+      } catch (e) {
+        const be = e as BusinessError;
+        console.error(`${TAG} sync probe failed ${be.code} ${be.message}; async fallback`);
+        client.deleteBackward(1).then((done: boolean) => {
+          console.info(`${TAG} deleteBackward -> ${done}`);
+        }).catch((err: BusinessError) => {
+          console.error(`${TAG} deleteBackward: ${err.code} ${err.message}`);
+        });
+      }
+    } else {
+      console.warn(`${TAG} backspace with no inputClient`);
     }
+    this.notifyUi();
   }
 
   public chooseCandidate(index: number): void {
     if (index >= 0 && index < this.candidates.length) {
-      this.commitCandidate(this.candidates[index]);
+      this.commitText(this.candidates[index].text);
     }
   }
 
   /** Punctuation: flush the pending composition first, then type the symbol. */
   public onPunctuation(ch: string): void {
     if (this.composition.length > 0) {
-      this.commitText(this.composition);
+      this.commitText(this.rawCand().text);
     }
     this.commitText(ch);
   }
 
-  private commitCandidate(cand: Cand): void {
-    this.commitText(cand.text);
-  }
-
   private commitText(text: string): void {
+    console.info(`${TAG} commitText "${text}" hasClient=${this.inputClient !== undefined}`);
     if (this.inputClient) {
-      this.inputClient.insertText(text).catch((err: BusinessError) => {
+      this.inputClient.insertText(text).then((done: boolean) => {
+        if (!done) {
+          console.warn(`${TAG} insertText returned false`);
+        }
+      }).catch((err: BusinessError) => {
         console.error(`${TAG} insertText: ${err.code} ${err.message}`);
       });
     }
-    const committed = text;
+    const committed: string = text;
     this.composition = '';
+    this.baseCands = [];
+    this.shiftOn = false;
     // related-word prediction (phrase_N.ms2) for the word just committed
     const predictions: Cand[] = dictEngine.predict(committed);
     if (predictions.length > 0) {

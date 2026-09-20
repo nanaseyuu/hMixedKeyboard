@@ -13,4 +13,12 @@
 *.hap
 *.hsp
 *.log
+
+# signing material: private keystore, certs and profiles must never be pushed
+/signing/
+
+# local machine script with the real keystore password (see cli_sign_install.example.bat)
+/cli_sign_install.bat
+/prep_signing.bat
+
 /build

@@ -2,13 +2,28 @@ import { util } from '@kit.ArkTS';
 import { resourceManager } from '@kit.LocalizationKit';
 
 /**
- * One candidate word parsed from a dictionary entry.
- * Dictionaries come from github.com/holleeb/Mixed-Chinese-Keyboard-Plus-Dicts (v2.1, .ms2 plain-text maps).
+ * One dictionary candidate.
+ *
+ * Format per explain.md of github.com/holleeb/Mixed-Chinese-Keyboard-Plus-Dicts:
+ * one entry per line:  key \t candidates \n
+ * - candidates are runs of `[N]text` where the ASCII digit prefix N is the
+ *   CHARACTER LENGTH of the candidate (candidates of length 1 have no prefix);
+ * - \u0000 begins the traditional-rare tier, \b begins the simplified tier,
+ *   \f begins the simplified-rare tier (order: trad, tradRare, simp, simpRare);
+ * - within a tier candidates are already in frequency order - do not re-sort.
+ *
+ * Dictionary keys are the typed code WITHOUT its first letter: code "aa" is
+ * stored as key "a" in file mix_map_bas_a.ms2, single-letter codes are stored
+ * under the empty key at the top of the file. The file for a query is picked
+ * by the first letter, and by the second letter for the split:
+ * _x = 2nd letter a..k (type 2A), _x1 = 2nd letter l..z (type 2B),
+ * _0 = keys not starting with a letter (type 3). ext_* files layer on top of
+ * bas_* files and must not override them.
  */
 export class Cand {
   text: string = '';
-  rank: number = 0;
   simplified: boolean = false;
+  isRaw: boolean = false;
 }
 
 export class LookupResult {
@@ -17,39 +32,28 @@ export class LookupResult {
 }
 
 const DICT_DIR: string = 'dict';
-const SECTION_TRAD: number = 0;
-const SECTION_TRAD_RARE: number = 1;
-const SECTION_SIMP: number = 2;
-const SECTION_SIMP_RARE: number = 3;
 
 // Unicode boundaries of phrase_N.ms2 related-word groups (first character codepoint).
 const PHRASE_BOUNDS: number[] = [21413, 23460, 25238, 26999, 29281, 31757, 33769, 36076, 38287];
 
 const MAX_SUGGEST: number = 16;
 
-/**
- * Loads and queries the Mixed Chinese Keyboard dictionaries.
- *
- * v2.1 .ms2 format, one entry per line:  key \t payload
- * payload is a mix of candidate sections separated by control chars:
- *   traditional \u0000 traditionalRare \u0008 simplified \u000c simplifiedRare
- * Inside a section an ASCII digit starts a new ranked candidate; chars without
- * a digit prefix are single-character candidates in frequency order.
- */
 export class DictEngine {
   private resourceManager: resourceManager.ResourceManager | undefined;
   private decoder: util.TextDecoder = util.TextDecoder.create('utf-8');
-  // key -> raw payload, only for the letter group currently in use
-  private groupCache: Map<string, string> = new Map();
-  private groupLetter: string = '';
-  // related-word groups: codepoint index -> key -> payload (only the last used group is kept)
+  // key -> raw payload for the letter group currently in use (bas/ext kept apart)
+  private basMap: Map<string, string> = new Map();
+  private extMap: Map<string, string> = new Map();
+  private curGroup: string = '';
+  // related-word groups: only the last used group is kept
   private phraseCache: Map<string, string> = new Map();
   private phraseIndex: number = -1;
 
   public setResourceManager(rm: resourceManager.ResourceManager): void {
     if (this.resourceManager !== rm) {
-      this.groupCache.clear();
-      this.groupLetter = '';
+      this.basMap.clear();
+      this.extMap.clear();
+      this.curGroup = '';
       this.phraseCache.clear();
       this.phraseIndex = -1;
     }
@@ -69,30 +73,6 @@ export class DictEngine {
     }
   }
 
-  /**
-   * Dictionary files are split by the first letter of the key:
-   * mix_map_bas_X / mix_map_bas_X1 (base) and mix_map_ext_X / mix_map_ext_X1 (extended).
-   */
-  private ensureLetterGroup(letter: string): void {
-    if (letter === this.groupLetter) {
-      return;
-    }
-    this.groupCache.clear();
-    const names: string[] = [];
-    if (letter >= 'a' && letter <= 'z') {
-      names.push(`mix_map_bas_${letter}.ms2`, `mix_map_bas_${letter}1.ms2`,
-        `mix_map_ext_${letter}.ms2`, `mix_map_ext_${letter}1.ms2`);
-    } else {
-      // numbers and symbols live in the un-suffixed files
-      names.push('mix_map_bas.ms2', 'mix_map_ext.ms2');
-    }
-    for (const name of names) {
-      const content = this.readRawFile(name);
-      this.parseInto(content, this.groupCache);
-    }
-    this.groupLetter = letter;
-  }
-
   private parseInto(content: string, target: Map<string, string>): void {
     if (content.length === 0) {
       return;
@@ -104,55 +84,88 @@ export class DictEngine {
         continue;
       }
       const tab = trimmed.indexOf('\t');
-      if (tab <= 0) {
+      if (tab < 0) {
         continue;
       }
+      // empty keys are valid (single-letter codes): key '' -> payload after tab
       target.set(trimmed.substring(0, tab), trimmed.substring(tab + 1));
     }
   }
 
-  private parsePayload(payload: string): Cand[] {
-    const sections: Cand[][] = [[], [], [], []];
-    let section = SECTION_TRAD;
-    let cur = '';
-    let rank = -1;
-    let index = 0;
-    const flush = () => {
-      if (cur.length > 0) {
-        const c = new Cand();
-        c.text = cur;
-        c.rank = rank < 0 ? 0 : rank;
-        c.simplified = section >= SECTION_SIMP;
-        c.rank += section * 10; // keep sections apart: trad < tradRare < simp < simpRare
-        sections[section].push(c);
-        cur = '';
-        rank = -1;
+  /** Load the bas_/ext_ file pair for the code prefix (first letter + 2A/2B split). */
+  private ensureGroup(first: string, second: string): void {
+    const isAlpha: boolean = first >= 'a' && first <= 'z';
+    const letter: string = isAlpha ? first : '0';
+    const use2B: boolean = isAlpha && second >= 'l' && second <= 'z';
+    const group: string = `${letter}${use2B ? '1' : ''}`;
+    if (group === this.curGroup) {
+      return;
+    }
+    this.curGroup = group;
+    this.basMap.clear();
+    this.extMap.clear();
+    this.parseInto(this.readRawFile(`mix_map_bas_${group}.ms2`), this.basMap);
+    this.parseInto(this.readRawFile(`mix_map_ext_${group}.ms2`), this.extMap);
+  }
+
+  /** Parse one `[N]text`-encoded candidate run within [from, to). */
+  private parseSection(payload: string, from: number, to: number, simplified: boolean, out: Cand[]): void {
+    let i: number = from;
+    while (i < to) {
+      const numStart: number = i;
+      while (i < to) {
+        const code: number = payload.charCodeAt(i);
+        if (code >= 48 && code <= 57) {
+          i++;
+        } else {
+          break;
+        }
       }
-      index++;
-    };
+      let len: number = 1;
+      if (i > numStart) {
+        // digit prefix = character length of the following candidate
+        const n: number = parseInt(payload.substring(numStart, i), 10);
+        if (i >= to) {
+          break; // trailing digits with no text: malformed, drop
+        }
+        len = Math.min(n, to - i);
+      }
+      const cand = new Cand();
+      cand.text = payload.substring(i, i + len);
+      cand.simplified = simplified;
+      out.push(cand);
+      i += len;
+    }
+  }
+
+  private parsePayload(payload: string): Cand[] {
+    const out: Cand[] = [];
+    let nul: number = -1;
+    let bs: number = -1;
+    let ff: number = -1;
     for (let i = 0; i < payload.length; i++) {
-      const code = payload.charCodeAt(i);
-      if (code === 0) {
-        flush();
-        section = SECTION_TRAD_RARE;
-      } else if (code === 8) {
-        flush();
-        section = SECTION_SIMP;
-      } else if (code === 12) {
-        flush();
-        section = SECTION_SIMP_RARE;
-      } else if (code >= 48 && code <= 57) {
-        flush();
-        rank = code - 48;
-      } else {
-        cur += payload.charAt(i);
+      const code: number = payload.charCodeAt(i);
+      if (code === 0 && nul < 0) {
+        nul = i;
+      } else if (code === 8 && bs < 0) {
+        bs = i;
+      } else if (code === 12 && ff < 0) {
+        ff = i;
       }
     }
-    flush();
-    const out: Cand[] = [];
-    for (const s of sections) {
-      s.sort((a, b) => a.rank - b.rank); // stable, keeps frequency order inside a rank
-      out.push(...s);
+    const tradEnd: number = nul >= 0 ? nul : (bs >= 0 ? bs : (ff >= 0 ? ff : payload.length));
+    this.parseSection(payload, 0, tradEnd, false, out);
+    // rare tiers only count when their markers follow the tier order
+    if (nul >= 0) {
+      const rareEnd: number = bs > nul ? bs : (ff > nul ? ff : payload.length);
+      this.parseSection(payload, nul + 1, rareEnd, false, out);
+    }
+    if (bs >= 0) {
+      const simpEnd: number = ff > bs ? ff : payload.length;
+      this.parseSection(payload, bs + 1, simpEnd, true, out);
+      if (ff > bs) {
+        this.parseSection(payload, ff + 1, payload.length, true, out);
+      }
     }
     return out;
   }
@@ -162,52 +175,81 @@ export class DictEngine {
     if (query.length === 0) {
       return result;
     }
-    const first = query.charAt(0);
-    this.ensureLetterGroup(first);
-    const payload = this.groupCache.get(query);
-    if (payload !== undefined) {
-      result.exact = this.parsePayload(payload);
+    const first: string = query.charAt(0);
+    const second: string = query.length > 1 ? query.charAt(1) : '';
+    this.ensureGroup(first, second);
+    const isAlpha: boolean = first >= 'a' && first <= 'z';
+    // dictionary keys drop the code's first letter; single-letter codes key on ''
+    const keys: string[] = [];
+    if (isAlpha) {
+      keys.push(query.length > 1 ? query.substring(1) : '');
+    } else {
+      keys.push(query);
+      if (query.length > 1) {
+        keys.push(query.substring(1));
+      }
+    }
+    for (const key of keys) {
+      const base: string | undefined = this.basMap.get(key);
+      if (base !== undefined) {
+        result.exact.push(...this.parsePayload(base));
+      }
+      const ext: string | undefined = this.extMap.get(key);
+      if (ext !== undefined) {
+        result.exact.push(...this.parsePayload(ext));
+      }
     }
     if (query.length >= 2) {
-      // prefix suggestions are only useful once the code is long enough
-      let budget = MAX_SUGGEST;
-      this.groupCache.forEach((value: string, key: string) => {
-        if (budget <= 0) {
-          return;
-        }
-        if (key.length > query.length && key.startsWith(query)) {
-          const cands = this.parsePayload(value);
-          for (let i = 0; i < Math.min(2, cands.length) && budget > 0; i++) {
-            result.suggest.push(cands[i]);
-            budget--;
+      const key: string = isAlpha && query.length > 1 ? query.substring(1) : query;
+      let budget: number = MAX_SUGGEST;
+      const collect = (map: Map<string, string>): void => {
+        map.forEach((value: string, k: string) => {
+          if (budget <= 0) {
+            return;
           }
-        }
-      });
+          if (k.length > key.length && k.startsWith(key)) {
+            const cands = this.parsePayload(value);
+            for (let i = 0; i < Math.min(2, cands.length) && budget > 0; i++) {
+              result.suggest.push(cands[i]);
+              budget--;
+            }
+          }
+        });
+      };
+      collect(this.basMap);
+      collect(this.extMap);
     }
     return result;
   }
 
-  /** Related-word suggestions (phrase_N.ms2) for a committed Chinese word. */
+  /** Related-word suggestions: phrase candidates are suffixes appended to the word. */
   public predict(word: string): Cand[] {
     if (word.length === 0) {
       return [];
     }
-    const cp = word.codePointAt(0) ?? 0;
-    let idx = 0;
+    const cp: number = word.codePointAt(0) ?? 0;
+    let idx: number = 0;
     while (idx < PHRASE_BOUNDS.length && cp > PHRASE_BOUNDS[idx]) {
       idx++;
     }
     if (idx !== this.phraseIndex) {
       this.phraseCache.clear();
-      const content = this.readRawFile(`phrase_${idx}.ms2`);
-      this.parseInto(content, this.phraseCache);
+      this.parseInto(this.readRawFile(`phrase_${idx}.ms2`), this.phraseCache);
       this.phraseIndex = idx;
     }
-    const payload = this.phraseCache.get(word);
+    const payload: string | undefined = this.phraseCache.get(word);
     if (payload === undefined) {
       return [];
     }
-    return this.parsePayload(payload);
+    const suffixes: Cand[] = this.parsePayload(payload);
+    const out: Cand[] = [];
+    for (const suffix of suffixes) {
+      const cand = new Cand();
+      cand.text = word + suffix.text;
+      cand.simplified = suffix.simplified;
+      out.push(cand);
+    }
+    return out;
   }
 }
 
