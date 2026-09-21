@@ -1,9 +1,8 @@
-import { AbilityConstant, ConfigurationConstant, UIAbility, Want, abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
+import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 
 const DOMAIN = 0x0000;
-const MIC: Permissions[] = ['ohos.permission.MICROPHONE'];
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
@@ -13,13 +12,6 @@ export default class EntryAbility extends UIAbility {
       hilog.error(DOMAIN, 'testTag', 'Failed to set colorMode. Cause: %{public}s', JSON.stringify(err));
     }
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
-  }
-
-  /** Ask for the microphone once from the app UI; the IME process uses it afterwards. */
-  public static requestMic(context: common.UIAbilityContext): Promise<void> {
-    return abilityAccessCtrl.createAtManager().requestPermissionsFromUser(context, MIC)
-      .then(() => undefined)
-      .catch(() => undefined);
   }
 
   onDestroy(): void {
@@ -36,7 +28,6 @@ export default class EntryAbility extends UIAbility {
         return;
       }
       hilog.info(DOMAIN, 'testTag', 'Succeeded in loading the content.');
-      EntryAbility.requestMic(this.context);
     });
   }
 

@@ -35,16 +35,12 @@ struct KeyboardIndex {
   @State shiftOn: boolean = false;
   @State rowHeight: number = 46;
   @State pressedKey: string = '';
-  @State voiceOn: boolean = false;
-  @State voiceHint: string = '';
   @State collapsed: boolean = false;
   @State physicalMode: boolean = false;
   @State physicalPinyin: boolean = true;
   @State selCand: number = -1;
   @State expandedScreen: boolean = false;
 
-  private voiceTimer: number = -1;
-  private voiceFired: boolean = false;
   private repeatTimer: number = -1;
   private repeating: string = '';
   private chipScroller: Scroller = new Scroller();
@@ -52,15 +48,13 @@ struct KeyboardIndex {
   aboutToAppear(): void {
     this.expandedScreen = mixedController.isExpandedScreen();
     mixedController.setUiListener((comp: string, cands: Cand[], predicting: boolean,
-      shift: boolean, rowHeight: number, voiceOn: boolean, voiceHint: string,
+      shift: boolean, rowHeight: number,
       collapsed: boolean, physicalMode: boolean, pinyinOn: boolean, sel: number) => {
       this.composition = comp;
       this.candidates = cands;
       this.predicting = predicting;
       this.shiftOn = shift;
       this.rowHeight = rowHeight;
-      this.voiceOn = voiceOn;
-      this.voiceHint = voiceHint;
       this.collapsed = collapsed;
       this.physicalMode = physicalMode;
       this.physicalPinyin = pinyinOn;
@@ -152,12 +146,6 @@ struct KeyboardIndex {
   }
 
   private barLabel(): string {
-    if (this.voiceOn) {
-      return '🎤 聆聽中…';
-    }
-    if (this.voiceHint.length > 0) {
-      return this.voiceHint;
-    }
     if (this.predicting) {
       return '聯想';
     }
@@ -385,9 +373,9 @@ struct KeyboardIndex {
 
   @Builder
   SpaceKey() {
-    Text(this.voiceOn ? '🎤 放開結束' : '空白')
+    Text('空白')
       .fontSize(20)
-      .fontColor(this.voiceOn ? '#2B5FBF' : FG_TEXT)
+      .fontColor(FG_TEXT)
       .textAlign(TextAlign.Center)
       .backgroundColor(this.keyBg(BG_KEY, 'space'))
       .borderRadius(8)
@@ -395,39 +383,17 @@ struct KeyboardIndex {
       .height(this.rowHeight)
       .margin(this.expandedScreen ? 0 : 3)
       .onTouch((e: TouchEvent) => {
-        // Space never repeats: a held Space belongs to voice input instead
-        if (e.type === TouchType.Down) {
-          if (this.pressedKey === 'space') {
-            return;
-          }
-          this.pressedKey = 'space';
-          this.voiceFired = false;
-          this.voiceTimer = setTimeout(() => {
-            this.voiceFired = true;
-            mixedController.onVoiceStart();
-          }, 450);
-        } else if (e.type === TouchType.Up || e.type === TouchType.Cancel) {
-          if (this.pressedKey === 'space') {
-            this.pressedKey = '';
-          }
-          if (this.voiceTimer !== -1) {
-            clearTimeout(this.voiceTimer);
-            this.voiceTimer = -1;
-          }
-          if (this.voiceFired) {
-            this.voiceFired = false;
-            mixedController.onVoiceStop();
-          } else if (e.type === TouchType.Up) {
-            mixedController.onSpace();
-          }
-        }
+        // no repeat: a held Space should stay one space
+        this.startPress('space', e, () => {
+          mixedController.onSpace();
+        }, false);
       })
   }
 
   @Builder
   EnterKey() {
-    Text('⏎')
-      .fontSize(20)
+    Text(this.shiftOn ? '換行' : '⏎')
+      .fontSize(this.shiftOn ? 15 : 20)
       .fontColor(FG_TEXT)
       .textAlign(TextAlign.Center)
       .backgroundColor(this.keyBg(BG_FUNC, 'enter'))
@@ -437,14 +403,30 @@ struct KeyboardIndex {
       .margin(this.expandedScreen ? 0 : 3)
       .onTouch((e: TouchEvent) => {
         this.startPress('enter', e, () => {
-          mixedController.onEnter();
+          // Shift+Enter forces a literal line break; plain Enter fires the
+          // editor's declared action (send/search/next/newline)
+          mixedController.onEnter(this.shiftOn);
         }, true);
       })
   }
 
+  /** Key legend: under Shift the punctuation keys advertise their full-width output. */
+  private puncLabel(ch: string): string {
+    if (!this.shiftOn) {
+      return ch;
+    }
+    if (ch === ',') {
+      return '，';
+    }
+    if (ch === '.') {
+      return '。';
+    }
+    return ch;
+  }
+
   @Builder
   PuncKey(ch: string) {
-    Text(ch)
+    Text(this.puncLabel(ch))
       .fontSize(20)
       .fontColor(FG_TEXT)
       .textAlign(TextAlign.Center)
@@ -500,9 +482,9 @@ struct KeyboardIndex {
           this.LetterRows()
           Row({ space: this.expandedScreen ? 10 : 2 }) {
             this.ModeKey()
-            this.PuncKey('，')
+            this.PuncKey(',')
             this.SpaceKey()
-            this.PuncKey('。')
+            this.PuncKey('.')
             this.EnterKey()
           }
         }

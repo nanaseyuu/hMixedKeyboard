@@ -3,14 +3,11 @@ import { display } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import inputDevice from '@ohos.multimodalInput.inputDevice';
 import { KeyEvent as PhysKeyEvent } from '@ohos.multimodalInput.keyEvent';
-import { speechRecognizer } from '@kit.CoreSpeechKit';
-import { audio } from '@kit.AudioKit';
 import { Cand, dictEngine, LookupResult } from './DictEngine';
 
 export type UiListener =
   (composition: string, candidates: Cand[], predicting: boolean, shift: boolean, rowHeight: number,
-    voiceOn: boolean, voiceHint: string, collapsed: boolean, physicalMode: boolean,
-    pinyinOn: boolean, sel: number) => void;
+    collapsed: boolean, physicalMode: boolean, pinyinOn: boolean, sel: number) => void;
 
 const TAG: string = 'MixedController';
 // fixed chrome above/below the key rows: candidate bar + row gaps + padding
@@ -249,15 +246,6 @@ class MixedController {
   public isCollapsed(): boolean {
     return this.physicalKbActive && !this.kbExpanded;
   }
-
-  // voice session (hold Space): on-device recognizer fed by AudioCapturer
-  private voiceEngine: speechRecognizer.SpeechRecognitionEngine | undefined = undefined;
-  private voiceCapturer: audio.AudioCapturer | undefined = undefined;
-  private voiceSessionId: string = '';
-  private voiceBuf: Uint8Array = new Uint8Array(0);
-  private voiceText: string = '';
-  private voiceOn: boolean = false;
-  private voiceHint: string = '';
 
   public onCreate(context: InputMethodExtensionContext): void {
     console.info(`${TAG} onCreate enter`);
@@ -584,191 +572,18 @@ class MixedController {
     });
   }
 
-  /**
-   * Voice typing (#3): hold Space to dictate. CoreSpeechKit runs on-device
-   * (online=1); AudioCapturer streams 16k mono S16 PCM in 1280-byte chunks.
-   * Releasing Space finishes and inserts the recognized text.
-   */
-  public onVoiceStart(): void {
-    if (this.voiceOn) {
-      return;
-    }
-    this.voiceHint = '';
-    this.voiceText = '';
-    this.voiceBuf = new Uint8Array(0);
-    if (this.composition.length > 0) {
-      this.resetComposition();
-    }
-    this.voiceOn = true;
-    this.notifyUi();
-    this.startVoiceCapture();
-  }
-
-  public onVoiceStop(): void {
-    if (!this.voiceOn) {
-      return;
-    }
-    this.voiceOn = false;
-    this.notifyUi();
-    this.stopCapturer();
-    try {
-      this.voiceEngine?.finish(this.voiceSessionId);
-    } catch (e) {
-      const be = e as BusinessError;
-      console.warn(`${TAG} voice finish: ${be.code}`);
-    }
-  }
-
-  private startVoiceCapture(): void {
-    const sid: string = `hmixed-${Date.now()}`;
-    this.voiceSessionId = sid;
-    let engineStep: Promise<void>;
-    if (this.voiceEngine) {
-      engineStep = Promise.resolve();
-    } else {
-      const ep: speechRecognizer.CreateEngineParams = { language: 'zh-CN', online: 1 };
-      engineStep = speechRecognizer.createEngine(ep).then((engine: speechRecognizer.SpeechRecognitionEngine) => {
-        this.voiceEngine = engine;
-        const listener: speechRecognizer.RecognitionListener = {
-          onStart: (s: string, m: string) => {
-            console.info(`${TAG} voice onStart ${s}`);
-          },
-          onEvent: (s: string, code: number, m: string) => {
-            console.info(`${TAG} voice onEvent ${code}`);
-          },
-          onResult: (s: string, r: speechRecognizer.SpeechRecognitionResult) => {
-            console.info(`${TAG} voice result: ${r.result}`);
-            if (r.result.length > 0) {
-              this.voiceText = r.result;
-            }
-          },
-          onComplete: (s: string, m: string) => {
-            this.voiceComplete();
-          },
-          onError: (s: string, code: number, msg: string) => {
-            console.error(`${TAG} voice onError ${code} ${msg}`);
-            this.voiceFail(`語音識別失敗 ${code}`);
-          }
-        };
-        engine.setListener(listener);
-      });
-    }
-    engineStep.then(() => {
-      const engine = this.voiceEngine;
-      if (!engine) {
-        throw new Error('voice engine missing') as Error;
-      }
-      const sp: speechRecognizer.StartParams = {
-        sessionId: sid,
-        audioInfo: { audioType: 'pcm', sampleRate: 16000, soundChannel: 1, sampleBit: 16 }
-      };
-      engine.startListening(sp);
-      return this.makeCapturer();
-    }).then((cap: audio.AudioCapturer) => {
-      this.voiceCapturer = cap;
-      return cap.start();
-    }).catch((err: BusinessError) => {
-      console.error(`${TAG} voice start failed: ${err.code} ${err.message}`);
-      // 201 = permission denied, 4401005/122 = mic not granted
-      if (err.code === 201 || err.code === 4401005 || err.code === 122) {
-        this.voiceFail('請先打開 hMixed App 授權麥克風');
-      } else {
-        this.voiceFail('無法啟動語音輸入');
-      }
-    });
-  }
-
-  private makeCapturer(): Promise<audio.AudioCapturer> {
-    const streamInfo: audio.AudioStreamInfo = {
-      samplingRate: audio.AudioSamplingRate.SAMPLE_RATE_16000,
-      channels: audio.AudioChannel.CHANNEL_1,
-      sampleFormat: audio.AudioSampleFormat.SAMPLE_FORMAT_S16LE,
-      encodingType: audio.AudioEncodingType.ENCODING_TYPE_RAW
-    };
-    const capturerInfo: audio.AudioCapturerInfo = {
-      source: audio.SourceType.SOURCE_TYPE_MIC,
-      capturerFlags: 0
-    };
-    const opts: audio.AudioCapturerOptions = {
-      streamInfo: streamInfo,
-      capturerInfo: capturerInfo
-    };
-    return audio.createAudioCapturer(opts).then((cap: audio.AudioCapturer) => {
-      cap.on('readData', (buff: ArrayBuffer) => {
-        this.feedVoice(buff);
-      });
-      return cap;
-    });
-  }
-
-  private feedVoice(buff: ArrayBuffer): void {
-    const engine = this.voiceEngine;
-    if (!engine || !this.voiceOn) {
-      return;
-    }
-    const incoming = new Uint8Array(buff);
-    const merged = new Uint8Array(this.voiceBuf.length + incoming.length);
-    merged.set(this.voiceBuf, 0);
-    merged.set(incoming, this.voiceBuf.length);
-    let off: number = 0;
-    while (merged.length - off >= 1280) {
-      try {
-        engine.writeAudio(this.voiceSessionId, merged.subarray(off, off + 1280));
-      } catch (e) {
-        const be = e as BusinessError;
-        console.error(`${TAG} writeAudio: ${be.code}`);
-        break;
-      }
-      off += 1280;
-    }
-    this.voiceBuf = merged.slice(off);
-  }
-
-  private voiceComplete(): void {
-    this.stopCapturer();
-    const text: string = this.voiceText;
-    console.info(`${TAG} voice complete: "${text}"`);
-    if (text.length > 0) {
-      this.commitText(text);
-    }
-  }
-
-  private voiceFail(hint: string): void {
-    this.stopCapturer();
-    try {
-      this.voiceEngine?.cancel(this.voiceSessionId);
-    } catch (e) {
-      // cancel of a not-started session is fine
-    }
-    this.voiceOn = false;
-    this.voiceHint = hint;
-    this.notifyUi();
-  }
-
-  private stopCapturer(): void {
-    const cap = this.voiceCapturer;
-    this.voiceCapturer = undefined;
-    if (cap) {
-      cap.stop().then(() => cap.release()).catch((e: BusinessError) => {
-        console.warn(`${TAG} capturer stop: ${e.code}`);
-      });
-    }
-  }
-
   public setUiListener(listener: UiListener | undefined): void {
     this.uiListener = listener;
     if (listener) {
       listener(this.composition, this.candidates, this.predicting, this.shiftOn, this.rowHeight,
-        this.voiceOn, this.voiceHint, this.isCollapsed(), this.physicalKbActive,
-        this.physicalPinyin, this.selCand);
+        this.isCollapsed(), this.physicalKbActive, this.physicalPinyin, this.selCand);
     }
   }
 
   private notifyUi(): void {
     if (this.uiListener) {
       this.uiListener(this.composition, this.candidates, this.predicting, this.shiftOn, this.rowHeight,
-        this.voiceOn, this.voiceHint, this.isCollapsed(), this.physicalKbActive,
-        this.physicalPinyin, this.selCand);
+        this.isCollapsed(), this.physicalKbActive, this.physicalPinyin, this.selCand);
     }
   }
 
@@ -845,13 +660,53 @@ class MixedController {
     this.commitText(' ');
   }
 
-  /** Enter: commit what is typed as plain letters. */
-  public onEnter(): void {
+  /**
+   * Enter: commit what is typed as plain letters; with nothing composing,
+   * honour the editor's declared key action. Single-line fields (search,
+   * chat-send, next-field) reject an inserted '\n' entirely, so they must
+   * get sendKeyFunction instead (ArkUI EnterKeyType: Go=2..Done=6; 0/1 =
+   * plain newline / none, where inserting '\n' still wins if accepted).
+   * Shift+Enter skips all that and asks for a literal line break.
+   */
+  public onEnter(shiftHeld: boolean = false): void {
     if (this.composition.length > 0) {
       this.commitText(this.rawCand().text);
       return;
     }
-    this.commitText('\n');
+    if (shiftHeld) {
+      this.commitText('\n');
+      return;
+    }
+    const client = this.inputClient;
+    if (!client) {
+      return;
+    }
+    client.getEditorAttribute().then((attr: inputMethodEngine.EditorAttribute) => {
+      const t: number = attr.enterKeyType;
+      console.info(`${TAG} onEnter enterKeyType=${t}`);
+      if (t >= 2) {
+        client.sendKeyFunction(t).then((ok: boolean) => {
+          if (!ok) {
+            client.insertText('\n');
+          }
+        }).catch((err: BusinessError) => {
+          console.error(`${TAG} sendKeyFunction: ${err.code}`);
+          client.insertText('\n');
+        });
+      } else {
+        client.insertText('\n').then((done: boolean) => {
+          if (!done) {
+            client.sendKeyFunction(t);
+          }
+        }).catch((err: BusinessError) => {
+          console.error(`${TAG} insertText: ${err.code}`);
+          client.sendKeyFunction(t);
+        });
+      }
+    }).catch((err: BusinessError) => {
+      console.error(`${TAG} getEditorAttribute: ${err.code}`);
+      client.insertText('\n');
+    });
   }
 
   /**
@@ -931,7 +786,24 @@ class MixedController {
     if (this.composition.length > 0) {
       this.commitText(this.rawCand().text);
     }
-    this.commitText(ch);
+    this.commitText(this.shiftOn ? MixedController.flipPunct(ch) : ch);
+  }
+
+  /** Shift on a punctuation key swaps half <-> full width (. 。 , ，). */
+  private static flipPunct(ch: string): string {
+    if (ch === '.') {
+      return '。';
+    }
+    if (ch === '。') {
+      return '.';
+    }
+    if (ch === ',') {
+      return '，';
+    }
+    if (ch === '，') {
+      return ',';
+    }
+    return ch;
   }
 
   private commitText(text: string): void {
