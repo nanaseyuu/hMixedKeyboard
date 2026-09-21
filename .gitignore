@@ -21,4 +21,14 @@
 /cli_sign_install.bat
 /prep_signing.bat
 
+# local-only helper scripts (device addresses, UDIDs, debug probes)
+/pad_deploy.bat
+/pad_udid.txt
+/kb_watch.bat
+/analyze_kb.ps1
+/dump_check.js
+/key_bounds.js
+/list_types.js
+/node_bounds.js
+
 /build

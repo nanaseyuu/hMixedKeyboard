@@ -28,7 +28,11 @@ full panel pinned. Current policy (collapse): while a physical keyboard is
 attached the panel shrinks to a slim candidate bar (COLLAPSED_VP=60) with a ^
 restore arrow on the right — tap ^ for the full keys, ⌄ (shown in the bar when
 expanded) to collapse again. Auto re-show after ~600ms is kept as a safety
-net if the bar ever gets hidden while an editor is still attached. SDK
-caveat: third-party IMEs receive no physical keystrokes at this API level, so
-the bar shows candidates only for text typed through the soft panel; physical
-typing is handled directly by the system. Verified on device.
+net if the bar ever gets hidden while an editor is still attached.
+Physical-key typing is captured via `KeyboardDelegate.on('keyEvent')`:
+letters build pinyin with candidates in the bar; digits 1-9/0 pick numbered
+candidates; any other symbol sends the raw English plus that symbol; Space
+sends raw English; arrow keys navigate a highlight (incl. the un-numbered
+raw chip, auto-scrolled into view) that Space/Enter commits. 漢/EN button in
+the collapsed bar hands the keys back to the app for plain English typing.
+Verified on MatePad Edge and Mate XTS.

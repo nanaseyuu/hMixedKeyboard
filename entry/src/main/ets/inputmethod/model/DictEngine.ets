@@ -44,6 +44,10 @@ export class DictEngine {
   // key -> raw payload for the letter group currently in use (bas/ext kept apart)
   private basMap: Map<string, string> = new Map();
   private extMap: Map<string, string> = new Map();
+  // sorted key lists of the maps above: prefix suggestions binary-search these
+  // instead of scanning every key on each keystroke
+  private basSorted: string[] = [];
+  private extSorted: string[] = [];
   private curGroup: string = '';
   // related-word groups: only the last used group is kept
   private phraseCache: Map<string, string> = new Map();
@@ -106,6 +110,17 @@ export class DictEngine {
     this.extMap.clear();
     this.parseInto(this.readRawFile(`mix_map_bas_${group}.ms2`), this.basMap);
     this.parseInto(this.readRawFile(`mix_map_ext_${group}.ms2`), this.extMap);
+    this.basSorted = this.sortedKeys(this.basMap);
+    this.extSorted = this.sortedKeys(this.extMap);
+  }
+
+  private sortedKeys(map: Map<string, string>): string[] {
+    const keys: string[] = [];
+    map.forEach((value: string, k: string) => {
+      keys.push(k);
+    });
+    keys.sort();
+    return keys;
   }
 
   /** Parse one `[N]text`-encoded candidate run within [from, to). */
@@ -201,25 +216,55 @@ export class DictEngine {
     }
     if (query.length >= 2) {
       const key: string = isAlpha && query.length > 1 ? query.substring(1) : query;
-      let budget: number = MAX_SUGGEST;
-      const collect = (map: Map<string, string>): void => {
-        map.forEach((value: string, k: string) => {
-          if (budget <= 0) {
-            return;
-          }
-          if (k.length > key.length && k.startsWith(key)) {
-            const cands = this.parsePayload(value);
-            for (let i = 0; i < Math.min(2, cands.length) && budget > 0; i++) {
-              result.suggest.push(cands[i]);
-              budget--;
-            }
-          }
-        });
-      };
-      collect(this.basMap);
-      collect(this.extMap);
+      this.collectSuggest(this.basMap, this.basSorted, key, result);
+      this.collectSuggest(this.extMap, this.extSorted, key, result);
     }
     return result;
+  }
+
+  /** First index with keys[index] >= prefix in the sorted list. */
+  private lowerBound(keys: string[], prefix: string): number {
+    let lo: number = 0;
+    let hi: number = keys.length;
+    while (lo < hi) {
+      const mid: number = (lo + hi) >> 1;
+      if (keys[mid] < prefix) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    return lo;
+  }
+
+  /**
+   * Longer keys that start with the query, top 2 candidates each, capped at
+   * MAX_SUGGEST. Sorted keys make this a binary search plus a short forward
+   * walk — the old map.forEach scanned every key in the group per keystroke.
+   */
+  private collectSuggest(map: Map<string, string>, keys: string[],
+    prefix: string, result: LookupResult): void {
+    let budget: number = MAX_SUGGEST - result.suggest.length;
+    let i: number = this.lowerBound(keys, prefix);
+    while (i < keys.length && budget > 0) {
+      const k: string = keys[i];
+      if (!k.startsWith(prefix)) {
+        break;
+      }
+      i++;
+      if (k.length <= prefix.length) {
+        continue; // the exact key itself is already in the exact tier
+      }
+      const value: string | undefined = map.get(k);
+      if (value === undefined) {
+        continue;
+      }
+      const cands: Cand[] = this.parsePayload(value);
+      for (let j = 0; j < Math.min(2, cands.length) && budget > 0; j++) {
+        result.suggest.push(cands[j]);
+        budget--;
+      }
+    }
   }
 
   /** Related-word suggestions: phrase candidates are suffixes appended to the word. */

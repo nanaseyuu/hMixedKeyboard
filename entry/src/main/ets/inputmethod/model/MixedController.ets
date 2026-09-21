@@ -2,13 +2,15 @@ import { inputMethodEngine, InputMethodExtensionContext } from '@kit.IMEKit';
 import { display } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import inputDevice from '@ohos.multimodalInput.inputDevice';
+import { KeyEvent as PhysKeyEvent } from '@ohos.multimodalInput.keyEvent';
 import { speechRecognizer } from '@kit.CoreSpeechKit';
 import { audio } from '@kit.AudioKit';
 import { Cand, dictEngine, LookupResult } from './DictEngine';
 
 export type UiListener =
   (composition: string, candidates: Cand[], predicting: boolean, shift: boolean, rowHeight: number,
-    voiceOn: boolean, voiceHint: string, collapsed: boolean, physicalMode: boolean) => void;
+    voiceOn: boolean, voiceHint: string, collapsed: boolean, physicalMode: boolean,
+    pinyinOn: boolean, sel: number) => void;
 
 const TAG: string = 'MixedController';
 // fixed chrome above/below the key rows: candidate bar + row gaps + padding
@@ -35,6 +37,24 @@ const CELIA_PORTRAIT_RATE: number = 0.40;
 // and auto re-show if the bar ever gets hidden while an editor is attached.
 const PHYSICAL_KB_PIN_ENABLED: boolean = true;
 const COLLAPSED_VP: number = 60;
+// physical key capture via KeyboardDelegate.on('keyEvent'): with the pad's
+// keyboard attached, typed letters build the pinyin composition and the
+// candidate bar offers Chinese, while Space/Backspace/Enter act on it.
+// The 漢/EN toggle hands keys back to the app for plain English typing.
+const PHYSICAL_KEY_CAPTURE_ENABLED: boolean = true;
+// multimodal KeyCode values (OpenHarmony numbering)
+const KC_0: number = 2000;
+const KC_9: number = 2009;
+const KC_UP: number = 2012;
+const KC_DOWN: number = 2013;
+const KC_LEFT: number = 2014;
+const KC_RIGHT: number = 2015;
+const KC_A: number = 2017;
+const KC_Z: number = 2042;
+const KC_SPACE: number = 2050;
+const KC_ENTER: number = 2054;
+const KC_DEL: number = 2055;
+const KEY_ACTION_PRESS: number = 1;
 
 /**
  * Creates the soft-keyboard panel, talks to the input client and keeps the
@@ -73,6 +93,157 @@ class MixedController {
   private kbExpanded: boolean = false;
   private basePanelHeight: number = 270;
   private panelShown: boolean = false;
+  // true = physical letters feed the pinyin engine; false = pass through (EN)
+  private physicalPinyin: boolean = true;
+  // index (into candidates) highlighted via arrow keys; -1 = nothing picked
+  private selCand: number = -1;
+
+  /**
+   * Arrow-key candidate navigation over all candidates, including the
+   * un-numbered raw-English chip (first stop). +1 next, -1 previous,
+   * 0 first, 2 last. Returns false (key passes to the editor) when the
+   * candidate list is empty.
+   */
+  private moveSel(delta: number): boolean {
+    const idxs: number[] = [];
+    for (let i = 0; i < this.candidates.length; i++) {
+      idxs.push(i);
+    }
+    if (idxs.length === 0) {
+      return false;
+    }
+    let pos: number = idxs.indexOf(this.selCand);
+    if (delta === 0) {
+      pos = 0;
+    } else if (delta === 2) {
+      pos = idxs.length - 1;
+    } else if (pos < 0) {
+      pos = 0;
+    } else {
+      pos = Math.min(Math.max(pos + delta, 0), idxs.length - 1);
+    }
+    this.selCand = idxs[pos];
+    this.notifyUi();
+    return true;
+  }
+
+  public isPhysicalPinyin(): boolean {
+    return this.physicalPinyin;
+  }
+
+  /** 漢/EN toggle in the candidate bar. */
+  public onTogglePhysicalPinyin(): void {
+    this.physicalPinyin = !this.physicalPinyin;
+    this.selCand = -1;
+    if (!this.physicalPinyin && this.composition.length > 0) {
+      this.composition = '';
+      this.baseCands = [];
+      this.candidates = [];
+      this.predicting = false;
+    }
+    console.info(`${TAG} physical pinyin mode -> ${this.physicalPinyin}`);
+    this.notifyUi();
+  }
+
+  /**
+   * KeyboardDelegate keyEvent hook: physical keystrokes while our IME is
+   * active. Letters build the composition (and are consumed so the editor
+   * does not also receive the raw text); Space/Backspace/Enter act on a
+   * pending composition, otherwise they pass through untouched.
+   */
+  private onPhysicalKeyEvent(ev: PhysKeyEvent): boolean {
+    if (!this.physicalPinyin || ev.action !== KEY_ACTION_PRESS || !this.inputClient) {
+      return false;
+    }
+    if (ev.ctrlKey || ev.altKey) {
+      return false; // shortcuts belong to the app
+    }
+    const code: number = ev.key.code as number;
+    if (code >= KC_0 && code <= KC_9) {
+      // number shortcuts 1..9 and 0=10 select the numbered bar candidates
+      if (this.composition.length === 0 && !this.predicting) {
+        return false; // no candidate list: digits type normally
+      }
+      const n: number = code === KC_0 ? 10 : code - KC_0;
+      let seen: number = 0;
+      for (let i = 0; i < this.candidates.length; i++) {
+        if (!this.candidates[i].isRaw) {
+          seen++;
+          if (seen === n) {
+            this.chooseCandidate(i);
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+    if (code >= KC_A && code <= KC_Z) {
+      const ch: string = String.fromCharCode(97 + (code - KC_A));
+      if (ev.shiftKey || ev.capsLock) {
+        this.shiftOn = true;
+      }
+      this.onChar(ch);
+      return true;
+    }
+    if (code === KC_SPACE) {
+      if (this.selCand >= 0 && this.selCand < this.candidates.length) {
+        // Space/Enter commit the arrow-highlighted candidate
+        this.commitText(this.candidates[this.selCand].text);
+        return true;
+      }
+      if (this.composition.length > 0) {
+        // no candidate picked: physical Space accepts the raw English typed,
+        // trailing space included (numbers / taps still choose Chinese)
+        this.commitText(this.rawCand().text + ' ');
+        return true;
+      }
+      if (this.predicting) {
+        // plain space ends the related-word suggestion round
+        this.predicting = false;
+        this.candidates = [];
+        this.notifyUi();
+      }
+      return false;
+    }
+    if (code === KC_DEL) {
+      if (this.composition.length > 0) {
+        this.onBackspace();
+        return true;
+      }
+      return false;
+    }
+    if (code === KC_RIGHT) {
+      return this.moveSel(1);
+    }
+    if (code === KC_LEFT) {
+      return this.moveSel(-1);
+    }
+    if (code === KC_DOWN) {
+      return this.moveSel(0);
+    }
+    if (code === KC_UP) {
+      return this.moveSel(2);
+    }
+    if (this.composition.length > 0 && ev.unicodeChar >= 33) {
+      // any other printable symbol (, . ! ? ...) "sends" the raw English
+      // candidate followed by the symbol itself, like classic CJK IMEs
+      const ch: string = String.fromCodePoint(ev.unicodeChar);
+      this.commitText(this.rawCand().text + ch);
+      return true;
+    }
+    if (code === KC_ENTER) {
+      if (this.selCand >= 0 && this.selCand < this.candidates.length) {
+        this.commitText(this.candidates[this.selCand].text);
+        return true;
+      }
+      if (this.composition.length > 0) {
+        this.onEnter();
+        return true;
+      }
+      return false;
+    }
+    return false;
+  }
 
   /** true = only the candidate bar should be shown (physical keyboard in use) */
   public isCollapsed(): boolean {
@@ -107,6 +278,16 @@ class MixedController {
           this.applyPanelSize();
         }
       });
+    }
+    if (PHYSICAL_KEY_CAPTURE_ENABLED) {
+      try {
+        inputMethodEngine.getKeyboardDelegate().on('keyEvent',
+          (ev: PhysKeyEvent): boolean => this.onPhysicalKeyEvent(ev));
+        console.info(`${TAG} physical key capture subscribed`);
+      } catch (e) {
+        const be = e as BusinessError;
+        console.error(`${TAG} keyEvent subscribe failed: ${be.code}`);
+      }
     }
     console.info(`${TAG} onCreate done`);
   }
@@ -578,14 +759,16 @@ class MixedController {
     this.uiListener = listener;
     if (listener) {
       listener(this.composition, this.candidates, this.predicting, this.shiftOn, this.rowHeight,
-        this.voiceOn, this.voiceHint, this.isCollapsed(), this.physicalKbActive);
+        this.voiceOn, this.voiceHint, this.isCollapsed(), this.physicalKbActive,
+        this.physicalPinyin, this.selCand);
     }
   }
 
   private notifyUi(): void {
     if (this.uiListener) {
       this.uiListener(this.composition, this.candidates, this.predicting, this.shiftOn, this.rowHeight,
-        this.voiceOn, this.voiceHint, this.isCollapsed(), this.physicalKbActive);
+        this.voiceOn, this.voiceHint, this.isCollapsed(), this.physicalKbActive,
+        this.physicalPinyin, this.selCand);
     }
   }
 
@@ -595,6 +778,7 @@ class MixedController {
     this.candidates = [];
     this.predicting = false;
     this.shiftOn = false;
+    this.selCand = -1;
     this.notifyUi();
   }
 
@@ -624,6 +808,7 @@ class MixedController {
   /** A letter key was pressed: extend the composition and look up candidates. */
   public onChar(ch: string): void {
     this.predicting = false;
+    this.selCand = -1;
     this.composition += ch;
     const result: LookupResult = dictEngine.lookup(this.composition);
     this.baseCands = result.exact.concat(result.suggest);
@@ -675,6 +860,7 @@ class MixedController {
    */
   public onBackspace(): void {
     console.info(`${TAG} onBackspace comp=${this.composition} predicting=${this.predicting} hasClient=${this.inputClient !== undefined}`);
+    this.selCand = -1;
     if (this.composition.length > 0) {
       this.composition = this.composition.substring(0, this.composition.length - 1);
       if (this.composition.length === 0) {
@@ -763,6 +949,7 @@ class MixedController {
     this.composition = '';
     this.baseCands = [];
     this.shiftOn = false;
+    this.selCand = -1;
     // related-word prediction (phrase_N.ms2) for the word just committed
     const predictions: Cand[] = dictEngine.predict(committed);
     if (predictions.length > 0) {
