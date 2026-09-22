@@ -90,7 +90,7 @@ class MixedController {
   private kbExpanded: boolean = false;
   private basePanelHeight: number = 270;
   private panelShown: boolean = false;
-  // true = physical letters feed the pinyin engine; false = pass through (EN)
+  // true = letters feed the pinyin engine; false = EN mode, letters commit raw
   private physicalPinyin: boolean = true;
   // index (into candidates) highlighted via arrow keys; -1 = nothing picked
   private selCand: number = -1;
@@ -128,7 +128,7 @@ class MixedController {
     return this.physicalPinyin;
   }
 
-  /** 漢/EN toggle in the candidate bar. */
+  /** 漢/EN toggle (bottom-row key / collapsed bar): EN commits letters raw. */
   public onTogglePhysicalPinyin(): void {
     this.physicalPinyin = !this.physicalPinyin;
     this.selCand = -1;
@@ -149,13 +149,22 @@ class MixedController {
    * pending composition, otherwise they pass through untouched.
    */
   private onPhysicalKeyEvent(ev: PhysKeyEvent): boolean {
-    if (!this.physicalPinyin || ev.action !== KEY_ACTION_PRESS || !this.inputClient) {
+    if (ev.action !== KEY_ACTION_PRESS || !this.inputClient) {
+      return false;
+    }
+    const code: number = ev.key.code as number;
+    // Ctrl+Space toggles 漢/EN in both directions (checked before the EN
+    // pass-through, otherwise EN mode could never be left again)
+    if (ev.ctrlKey && !ev.altKey && code === KC_SPACE) {
+      this.onTogglePhysicalPinyin();
+      return true;
+    }
+    if (!this.physicalPinyin) {
       return false;
     }
     if (ev.ctrlKey || ev.altKey) {
-      return false; // shortcuts belong to the app
+      return false; // other shortcuts belong to the app
     }
-    const code: number = ev.key.code as number;
     if (code >= KC_0 && code <= KC_9) {
       // number shortcuts 1..9 and 0=10 select the numbered bar candidates
       if (this.composition.length === 0 && !this.predicting) {
@@ -620,8 +629,16 @@ class MixedController {
     }
   }
 
-  /** A letter key was pressed: extend the composition and look up candidates. */
+  /**
+   * A letter key was pressed. In EN mode (漢/EN toggle) letters commit
+   * straight to the editor as typed English; Shift provides one capital.
+   * In 漢 mode the letter extends the pinyin composition.
+   */
   public onChar(ch: string): void {
+    if (!this.physicalPinyin) {
+      this.commitText(this.shiftOn ? ch.toUpperCase() : ch);
+      return;
+    }
     this.predicting = false;
     this.selCand = -1;
     this.composition += ch;

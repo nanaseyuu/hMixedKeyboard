@@ -60,8 +60,8 @@ struct KeyboardIndex {
       this.physicalPinyin = pinyinOn;
       this.selCand = sel;
       if (sel >= 0) {
-        // keep the highlighted candidate visible (first ListItem is the label)
-        const idx: number = sel + 1;
+        // keep the highlighted candidate visible (status chip occupies ListItem 0 when shown)
+        const idx: number = sel + ((comp.length > 0 || predicting) ? 1 : 0);
         setTimeout(() => {
           try {
             this.chipScroller.scrollToIndex(idx, false, ScrollAlign.CENTER);
@@ -177,25 +177,37 @@ struct KeyboardIndex {
   }
 
   private candLabel(index: number): string {
-    const n: number = this.candNum(index);
     const text: string = this.candidates[index].text;
+    // digit shortcuts (and their N. prefix) only apply when a physical
+    // keyboard is attached; the soft panel taps candidates directly
+    if (!this.physicalMode) {
+      return text;
+    }
+    const n: number = this.candNum(index);
     if (n === 0) {
       return text;
     }
     return n === 10 ? `0.${text}` : `${n}.${text}`;
   }
 
+  /** The grey status chip only earns its space while composing or predicting. */
+  private labelVisible(): boolean {
+    return this.composition.length > 0 || this.predicting;
+  }
+
   /** Label + candidate chips as a horizontal List: supports scrollToIndex. */
   @Builder
   Chips() {
     List({ space: 4, scroller: this.chipScroller }) {
-      ListItem() {
-        Text(this.barLabel())
-          .fontSize(14)
-          .fontColor('#8A8F99')
-          .backgroundColor('#E2E5EB')
-          .borderRadius(6)
-          .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+      if (this.labelVisible()) {
+        ListItem() {
+          Text(this.barLabel())
+            .fontSize(14)
+            .fontColor('#8A8F99')
+            .backgroundColor('#E2E5EB')
+            .borderRadius(6)
+            .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+        }
       }
       ForEach(this.candidates, (cand: Cand, index: number) => {
         ListItem() {
@@ -253,6 +265,25 @@ struct KeyboardIndex {
     .height(48)
     .backgroundColor(BG_BAR)
     .alignItems(VerticalAlign.Center)
+  }
+
+  /** Full-row 漢/EN key (Celia puts its 英/中 toggle second from left). */
+  @Builder
+  PinyinKey() {
+    Text(this.physicalPinyin ? '漢' : 'EN')
+      .fontSize(16)
+      .fontColor(this.physicalPinyin ? '#2B5FBF' : '#8A8F99')
+      .textAlign(TextAlign.Center)
+      .backgroundColor(this.keyBg(BG_FUNC, 'pinyin_row'))
+      .borderRadius(8)
+      .layoutWeight(this.expandedScreen ? 1 : 1.5)
+      .height(this.rowHeight)
+      .margin(this.expandedScreen ? 0 : 3)
+      .onTouch((e: TouchEvent) => {
+        this.startPress('pinyin_row', e, () => {
+          mixedController.onTogglePhysicalPinyin();
+        }, false);
+      })
   }
 
   /** 漢 = physical keys feed the pinyin engine; EN = keys go to the app. */
@@ -481,7 +512,9 @@ struct KeyboardIndex {
         Column({ space: this.expandedScreen ? 10 : 2 }) {
           this.LetterRows()
           Row({ space: this.expandedScreen ? 10 : 2 }) {
+            // Celia bottom row order (measured on-device): 符号 | 英/中 | , | space | . | 123 | Enter
             this.ModeKey()
+            this.PinyinKey()
             this.PuncKey(',')
             this.SpaceKey()
             this.PuncKey('.')
