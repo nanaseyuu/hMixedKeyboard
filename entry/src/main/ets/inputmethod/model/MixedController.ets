@@ -11,27 +11,22 @@ export type UiListener =
 
 const TAG: string = 'MixedController';
 // fixed chrome above/below the key rows: candidate bar + row gaps + padding
-const NON_ROW_VP: number = 86;
+// Jyutping sizing model (adopted 2026-09-24 from yuetyam/jyutping-harmony,
+// CC0 — user prefers their absolute sizes; our fold/rotate refresh engine
+// fixes their stale-sizing weakness):
+//   key(pt) = phone-landscape ? 36 : min(53 + floor((widthPt - 300) / 20), 58)
+//   panel   = 56 (slim toolbar incl. candidate bar) + key * 4
+// widthPt/heightPt are the CURRENT-orientation dimensions in points; a phone
+// is "landscape" when width > height and the short side < 500pt.
+const JYUT_TOOLBAR_PT: number = 56;
+const JYUT_KEY_LANDSCAPE_PHONE_PT: number = 36;
+const JYUT_KEY_PORTRAIT_BASE_PT: number = 53;
+const JYUT_KEY_PORTRAIT_MAX_PT: number = 58;
 const MIN_ROW_VP: number = 24;
-const MAX_ROW_VP: number = 46;
-// unfolded (bi-fold / tri-fold) screens get Celia-sized keys: measured Celia
-// runs ~320vp top-to-bottom on both unfolded panels at density 2.875, i.e.
-// ~57vp rows; the folded cover screen (short axis ~350vp) keeps the compact
-// MAX_ROW_VP sizing
+const MAX_ROW_VP: number = JYUT_KEY_PORTRAIT_MAX_PT;
 // tablet / unfolded-foldable class: short axis at least this many vp gets the
-// Celia-style geometry (a vp threshold, so it generalizes to future devices)
+// wider horizontal margins (styling only — vertical sizing is Jyutping's now)
 const EXPANDED_MIN_SHORT_AXIS_VP: number = 550;
-// Celia metrics measured on the MatePad Pro (2880x1920px, density 2): the
-// keyboard occupies the bottom 768px (384vp) — candidate bar 96px (48vp),
-// four 138px (68vp) key rows at 156px pitch (10vp gaps), and a 66px (33vp)
-// bottom pad that keeps the space key clear of the system gesture pill (y1864).
-// The same 40%-of-screen-height rule reproduces Celia's ~310-320vp panel on
-// the Mate XTS in every fold state and orientation, so expanded rows derive
-// from the fraction, clamped between these bounds for mid-size / huge tablets:
-const EXPANDED_MIN_ROW_VP: number = 40;
-const EXPANDED_MAX_ROW_VP: number = 68;
-const CELIA_CHROME_VP: number = 112; // 48 bar + 3 row gaps + 34 bottom pad
-const CELIA_HEIGHT_RATE: number = 0.40;
 // Physical keyboards (MatePad Edge share, Bluetooth/folio): the full panel
 // used to auto-hide on connect, which made the keyboard unrecoverable when
 // the shared mouse pointer leaves the screen. Policy now: collapse to a slim
@@ -66,7 +61,7 @@ class MixedController {
   // build identifier logged in onCreate: hilog "build <stamp>" proves which
   // bundle the LIVE service actually runs (install -r does not always
   // restart a running input-method service)
-  static readonly STAMP: string = 'revert-bs 2026-09-24 03:10';
+  static readonly STAMP: string = 'jyut-size 2026-09-24';
   private context: InputMethodExtensionContext | undefined;
   private panel: inputMethodEngine.Panel | undefined;
   private kbController: inputMethodEngine.KeyboardController | undefined;
@@ -362,33 +357,22 @@ class MixedController {
     // axis, which misdetected landscape and demanded an impossible
     // 2232px-wide resize that failed 12800008 forever).
     const isLandscape: boolean = dis.rotation === 1 || dis.rotation === 3;
-    // the screen's height in the CURRENT orientation drives row sizing
-    const verticalVp: number = isLandscape ? shortAxisVp : longAxisVp;
-    this.expandedScreen = shortAxisVp >= EXPANDED_MIN_SHORT_AXIS_VP;
-    const chrome: number = this.expandedScreen ? CELIA_CHROME_VP : NON_ROW_VP;
-    let rowH: number;
-    if (this.expandedScreen) {
-      // Celia-style: the whole keyboard takes ~40% of the current screen
-      // height, rows clamped so mid-size tablets stay tappable and huge ones
-      // don't grow giant keys
-      rowH = Math.floor((Math.floor(CELIA_HEIGHT_RATE * verticalVp) - chrome) / 4);
-      if (rowH < EXPANDED_MIN_ROW_VP) {
-        rowH = EXPANDED_MIN_ROW_VP;
-      } else if (rowH > EXPANDED_MAX_ROW_VP) {
-        rowH = EXPANDED_MAX_ROW_VP;
-      }
-    } else {
-      const budget: number = isLandscape
-        ? Math.min(0.5 * verticalVp, NON_ROW_VP + 4 * 30)
-        : Math.min(0.42 * verticalVp, NON_ROW_VP + 4 * MAX_ROW_VP);
-      rowH = Math.floor((budget - NON_ROW_VP) / 4);
-      if (rowH < MIN_ROW_VP) {
-        rowH = MIN_ROW_VP;
-      } else if (rowH > MAX_ROW_VP) {
-        rowH = MAX_ROW_VP;
-      }
+    // Jyutping sizing: key heights in POINTS from the current-orientation
+    // width — 53 + 1 per extra 20pt of width over 300, capped at 58 — with a
+    // flat 36pt key for phone-landscape screens. The slim 56pt toolbar is the
+    // only non-key furniture, so panel = 56 + 4 * key.
+    const widthPt: number = (isLandscape ? longPx : shortPx) / density;
+    const heightPt: number = (isLandscape ? shortPx : longPx) / density;
+    const isPhoneLandscape: boolean = widthPt > heightPt && heightPt < 500;
+    let keyPt: number = isPhoneLandscape
+      ? JYUT_KEY_LANDSCAPE_PHONE_PT
+      : Math.min(JYUT_KEY_PORTRAIT_BASE_PT + Math.floor((widthPt - 300) / 20), JYUT_KEY_PORTRAIT_MAX_PT);
+    if (keyPt < MIN_ROW_VP) {
+      keyPt = MIN_ROW_VP;
     }
-    this.rowHeight = rowH;
+    // expandedScreen now only drives horizontal margins/styling in the page
+    this.expandedScreen = shortAxisVp >= EXPANDED_MIN_SHORT_AXIS_VP;
+    this.rowHeight = Math.floor(keyPt);
     // the measured width is only a refinement: trust it when it agrees with
     // the rotation-implied axis (within 5%), otherwise fall back to the axis
     const impliedWpx: number = isLandscape ? longPx : shortPx;
@@ -396,13 +380,13 @@ class MixedController {
       && Math.abs(this.lastAreaW * density - impliedWpx) <= impliedWpx * 0.05
       ? this.lastAreaW
       : impliedWpx / density;
-    this.basePanelHeight = chrome + rowH * 4;
+    this.basePanelHeight = JYUT_TOOLBAR_PT + this.rowHeight * 4;
     // resize() is applied in PHYSICAL pixels, not vp: a resize(350, 270) for
     // 270vp produced a 270-px window (94vp) on a density-2.875 screen.
     this.densityPx = density;
     this.panelWidthPx = Math.round(this.panelWidth * density);
     this.applyPanelSize();
-    console.info(`${TAG} applyLayout: ${dis.width}x${dis.height} rot${dis.rotation} d${density} ${isLandscape ? 'landscape' : 'portrait'} short ${shortAxisVp}vp row ${rowH}vp panel ${this.panelWidth}x${this.panelHeight}vp (${this.panelWidthPx}x${this.panelHeightPx}px)`);
+    console.info(`${TAG} applyLayout: ${dis.width}x${dis.height} rot${dis.rotation} d${density} ${isLandscape ? 'landscape' : 'portrait'} ${isPhoneLandscape ? 'phone-landscape ' : ''}width ${Math.floor(widthPt)}pt row ${this.rowHeight}pt panel ${this.panelWidth}x${this.panelHeight}vp (${this.panelWidthPx}x${this.panelHeightPx}px)`);
   }
 
   /**
@@ -439,9 +423,9 @@ class MixedController {
     }
     const widthChanged: boolean = Math.abs(widthVp - this.lastAreaW) > 2;
     this.lastAreaW = widthVp;
-    const chrome: number = this.expandedScreen ? CELIA_CHROME_VP : NON_ROW_VP;
-    const minRow: number = this.expandedScreen ? EXPANDED_MIN_ROW_VP : MIN_ROW_VP;
-    const maxRow: number = this.expandedScreen ? EXPANDED_MAX_ROW_VP : MAX_ROW_VP;
+    const chrome: number = JYUT_TOOLBAR_PT;
+    const minRow: number = MIN_ROW_VP;
+    const maxRow: number = MAX_ROW_VP;
     if (this.isCollapsed()) {
       // collapsed bar: fixed height, but a rotation still swaps the width
       if (widthChanged && this.calibAttempts < 3 && Math.abs(widthVp - this.panelWidth) > 12) {
@@ -892,47 +876,23 @@ class MixedController {
     this.predicting = false;
     this.candidates = [];
     this.rawRound = '';
-    const client = this.inputClient;
-    if (client) {
-      try {
-        const idx: number = client.getTextIndexAtCursorSync();
-        const bwd: string = client.getBackwardSync(20);
-        const fwd: string = client.getForwardSync(10000);
-        console.info(`${TAG} probe idx=${idx} bwd="${bwd}" fwdLen=${fwd.length} fwd="${fwd.substring(0, 12)}"`);
-        if (bwd.length > 0) {
-          client.deleteBackwardSync(1);
-          console.info(`${TAG} deleteBackwardSync ok`);
-        } else if (fwd.length > 0) {
-          // this editor reports the cursor at index 0 while text exists after
-          // it, so delete-before-cursor is a silent no-op; delete the LAST
-          // character by selecting it and sending CUT instead
-          const range: inputMethodEngine.Range = { start: fwd.length - 1, end: fwd.length };
-          client.selectByRangeSync(range);
-          client.sendExtendAction(inputMethodEngine.ExtendAction.CUT).then(() => {
-            console.info(`${TAG} selection CUT sent (idx ${fwd.length - 1})`);
-          }).catch((err: BusinessError) => {
-            console.error(`${TAG} CUT: ${err.code} ${err.message}`);
-          });
-        } else {
-          client.deleteBackward(1).then((done: boolean) => {
-            console.info(`${TAG} deleteBackward -> ${done} (empty-editor path)`);
-          }).catch((err: BusinessError) => {
-            console.error(`${TAG} deleteBackward: ${err.code} ${err.message}`);
-          });
-        }
-      } catch (e) {
-        const be = e as BusinessError;
-        console.error(`${TAG} sync probe failed ${be.code} ${be.message}; async fallback`);
-        client.deleteBackward(1).then((done: boolean) => {
-          console.info(`${TAG} deleteBackward -> ${done}`);
-        }).catch((err: BusinessError) => {
-          console.error(`${TAG} deleteBackward: ${err.code} ${err.message}`);
-        });
-      }
-    } else {
-      console.warn(`${TAG} backspace with no inputClient`);
-    }
+    this.deleteBeforeCursor(1);
     this.notifyUi();
+  }
+
+  /**
+   * Deletes the `length` characters BEFORE the caret — the backspace
+   * direction. The SDK's deleteBackward/deleteForward naming is inverted
+   * relative to intuition: Jyutping (yuetyam/jyutping-harmony, shipping on
+   * AppGallery) maps its backspace KEY to deleteForward and keeps
+   * deleteBackward for right-side delete — and calling deleteBackward here
+   * visibly deleted the NEXT character (container apps, EasyAbroad). The
+   * mapping lives in this one helper so it can never drift between paths.
+   */
+  private deleteBeforeCursor(length: number): void {
+    this.inputClient?.deleteForward(length).catch((err: BusinessError) => {
+      console.error(`${TAG} deleteForward(backspace): ${err.code} ${err.message}`);
+    });
   }
 
   public chooseCandidate(index: number): void {
@@ -1071,7 +1031,10 @@ class MixedController {
       this.roundCommitting = false;
     };
     if (client) {
-      client.deleteBackward(digit.length).then((done: boolean) => {
+      // same direction rule as deleteBeforeCursor: deleteForward removes the
+      // text before the caret (Jyutping mapping) — the digit sits right
+      // before the caret after being committed
+      client.deleteForward(digit.length).then((done: boolean) => {
         if (done) {
           commitReplacement();
         } else {

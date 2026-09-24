@@ -263,7 +263,7 @@ struct KeyboardIndex {
       }
     }
     .width('100%')
-    .height(48)
+    .height(36)
     .backgroundColor(BG_BAR)
     .alignItems(VerticalAlign.Center)
   }
@@ -279,7 +279,7 @@ struct KeyboardIndex {
       .borderRadius(8)
       .layoutWeight(this.expandedScreen ? 1 : 1.5)
       .height(this.rowHeight)
-      .margin(this.expandedScreen ? 0 : 3)
+      .margin(1)
       .onTouch((e: TouchEvent) => {
         this.startPress('pinyin_row', e, () => {
           mixedController.onTogglePhysicalPinyin();
@@ -332,7 +332,7 @@ struct KeyboardIndex {
       .borderRadius(8)
       .layoutWeight(1)
       .height(this.rowHeight)
-      .margin(this.expandedScreen ? 0 : 3)
+      .margin(1)
       .onTouch((e: TouchEvent) => {
         this.startPress(`${this.rowTag()}_${ch}`, e, () => {
           if (num) {
@@ -354,7 +354,7 @@ struct KeyboardIndex {
       .borderRadius(8)
       .layoutWeight(this.expandedScreen ? 1.35 : 1.2)
       .height(this.rowHeight)
-      .margin(this.expandedScreen ? 0 : 3)
+      .margin(1)
       .onTouch((e: TouchEvent) => {
         this.startPress('shift', e, () => {
           if (this.numericMode) {
@@ -376,7 +376,7 @@ struct KeyboardIndex {
       .borderRadius(8)
       .layoutWeight(this.expandedScreen ? 1.55 : 1.2)
       .height(this.rowHeight)
-      .margin(this.expandedScreen ? 0 : 3)
+      .margin(1)
       .onTouch((e: TouchEvent) => {
         this.startPress('back', e, () => {
           mixedController.onBackspace();
@@ -394,7 +394,7 @@ struct KeyboardIndex {
       .borderRadius(8)
       .layoutWeight(this.expandedScreen ? 1 : 1.5)
       .height(this.rowHeight)
-      .margin(this.expandedScreen ? 0 : 3)
+      .margin(1)
       .onTouch((e: TouchEvent) => {
         this.startPress('mode', e, () => {
           this.numericMode = !this.numericMode;
@@ -413,7 +413,7 @@ struct KeyboardIndex {
       .borderRadius(8)
       .layoutWeight(this.expandedScreen ? 6 : 5)
       .height(this.rowHeight)
-      .margin(this.expandedScreen ? 0 : 3)
+      .margin(1)
       .onTouch((e: TouchEvent) => {
         // no repeat: a held Space should stay one space
         this.startPress('space', e, () => {
@@ -432,7 +432,7 @@ struct KeyboardIndex {
       .borderRadius(8)
       .layoutWeight(this.expandedScreen ? 1 : 1.5)
       .height(this.rowHeight)
-      .margin(this.expandedScreen ? 0 : 3)
+      .margin(1)
       .onTouch((e: TouchEvent) => {
         this.startPress('enter', e, () => {
           // Shift+Enter forces a literal line break; plain Enter fires the
@@ -466,7 +466,7 @@ struct KeyboardIndex {
       .borderRadius(8)
       .layoutWeight(1)
       .height(this.rowHeight)
-      .margin(this.expandedScreen ? 0 : 3)
+      .margin(1)
       .onTouch((e: TouchEvent) => {
         this.startPress(`p_${ch}`, e, () => {
           mixedController.onPunctuation(ch);
@@ -510,9 +510,9 @@ struct KeyboardIndex {
         this.CollapsedBar()
       } else {
         this.CandidateBar()
-        Column({ space: this.expandedScreen ? 10 : 2 }) {
+        Column({ space: 1 }) {
           this.LetterRows()
-          Row({ space: this.expandedScreen ? 10 : 2 }) {
+          Row({ space: 1 }) {
             // Celia bottom row order (measured on-device): 符号 | 英/中 | , | space | . | 123 | Enter
             this.ModeKey()
             this.PinyinKey()
@@ -522,8 +522,8 @@ struct KeyboardIndex {
             this.EnterKey()
           }
         }
-        .padding(this.expandedScreen ? { left: 24, right: 24, top: 0, bottom: 34 }
-          : { left: 4, right: 4, top: 2, bottom: 6 })
+        .padding(this.expandedScreen ? { left: 24, right: 24, top: 2, bottom: 2 }
+          : { left: 4, right: 4, top: 2, bottom: 2 })
       }
     }
     .width('100%')
