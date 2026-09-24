@@ -49,17 +49,18 @@ export class DictEngine {
   private basSorted: string[] = [];
   private extSorted: string[] = [];
   private curGroup: string = '';
-  // related-word groups: only the last used group is kept
-  private phraseCache: Map<string, string> = new Map();
-  private phraseIndex: number = -1;
+  // related-word buckets: each is a synchronous ~0.5MB parse on the input
+  // thread, so keep the few most recently used buckets resident — holding
+  // only one re-parsed the file on every Chinese<->ASCII (digit) switch and
+  // made the keyboard (and typing everywhere) stutter
+  private phraseBuckets: Map<number, Map<string, string>> = new Map();
 
   public setResourceManager(rm: resourceManager.ResourceManager): void {
     if (this.resourceManager !== rm) {
       this.basMap.clear();
       this.extMap.clear();
       this.curGroup = '';
-      this.phraseCache.clear();
-      this.phraseIndex = -1;
+      this.phraseBuckets.clear();
     }
     this.resourceManager = rm;
   }
@@ -277,12 +278,20 @@ export class DictEngine {
     while (idx < PHRASE_BOUNDS.length && cp > PHRASE_BOUNDS[idx]) {
       idx++;
     }
-    if (idx !== this.phraseIndex) {
-      this.phraseCache.clear();
-      this.parseInto(this.readRawFile(`phrase_${idx}.ms2`), this.phraseCache);
-      this.phraseIndex = idx;
+    let bucket: Map<string, string> | undefined = this.phraseBuckets.get(idx);
+    if (bucket === undefined) {
+      bucket = new Map<string, string>();
+      this.parseInto(this.readRawFile(`phrase_${idx}.ms2`), bucket);
+      // insertion-order eviction: cap resident buckets at 3 (~2MB worst case)
+      if (this.phraseBuckets.size >= 3) {
+        const oldest: number | undefined = this.phraseBuckets.keys().next().value;
+        if (oldest !== undefined) {
+          this.phraseBuckets.delete(oldest);
+        }
+      }
+      this.phraseBuckets.set(idx, bucket);
     }
-    const payload: string | undefined = this.phraseCache.get(word);
+    const payload: string | undefined = bucket.get(word);
     if (payload === undefined) {
       return [];
     }

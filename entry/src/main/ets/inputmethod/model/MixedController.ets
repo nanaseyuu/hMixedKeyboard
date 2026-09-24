@@ -7,7 +7,7 @@ import { Cand, dictEngine, LookupResult } from './DictEngine';
 
 export type UiListener =
   (composition: string, candidates: Cand[], predicting: boolean, shift: boolean, rowHeight: number,
-    collapsed: boolean, physicalMode: boolean, pinyinOn: boolean, sel: number) => void;
+    expanded: boolean, collapsed: boolean, physicalMode: boolean, pinyinOn: boolean, sel: number) => void;
 
 const TAG: string = 'MixedController';
 // fixed chrome above/below the key rows: candidate bar + row gaps + padding
@@ -18,15 +18,20 @@ const MAX_ROW_VP: number = 46;
 // runs ~320vp top-to-bottom on both unfolded panels at density 2.875, i.e.
 // ~57vp rows; the folded cover screen (short axis ~350vp) keeps the compact
 // MAX_ROW_VP sizing
-const EXPANDED_ROW_VP: number = 57;
+// tablet / unfolded-foldable class: short axis at least this many vp gets the
+// Celia-style geometry (a vp threshold, so it generalizes to future devices)
 const EXPANDED_MIN_SHORT_AXIS_VP: number = 550;
 // Celia metrics measured on the MatePad Pro (2880x1920px, density 2): the
 // keyboard occupies the bottom 768px (384vp) — candidate bar 96px (48vp),
 // four 138px (68vp) key rows at 156px pitch (10vp gaps), and a 66px (33vp)
 // bottom pad that keeps the space key clear of the system gesture pill (y1864).
+// The same 40%-of-screen-height rule reproduces Celia's ~310-320vp panel on
+// the Mate XTS in every fold state and orientation, so expanded rows derive
+// from the fraction, clamped between these bounds for mid-size / huge tablets:
+const EXPANDED_MIN_ROW_VP: number = 40;
+const EXPANDED_MAX_ROW_VP: number = 68;
 const CELIA_CHROME_VP: number = 112; // 48 bar + 3 row gaps + 34 bottom pad
-const CELIA_ROW_VP: number = 68;
-const CELIA_PORTRAIT_RATE: number = 0.40;
+const CELIA_HEIGHT_RATE: number = 0.40;
 // Physical keyboards (MatePad Edge share, Bluetooth/folio): the full panel
 // used to auto-hide on connect, which made the keyboard unrecoverable when
 // the shared mouse pointer leaves the screen. Policy now: collapse to a slim
@@ -58,6 +63,10 @@ const KEY_ACTION_PRESS: number = 1;
  * composition/candidate state shared with the keyboard page.
  */
 class MixedController {
+  // build identifier logged in onCreate: hilog "build <stamp>" proves which
+  // bundle the LIVE service actually runs (install -r does not always
+  // restart a running input-method service)
+  static readonly STAMP: string = 'revert-bs 2026-09-24 03:10';
   private context: InputMethodExtensionContext | undefined;
   private panel: inputMethodEngine.Panel | undefined;
   private kbController: inputMethodEngine.KeyboardController | undefined;
@@ -71,6 +80,14 @@ class MixedController {
   private rowHeight: number = 46;
   private measuredHeight: number = 0;
   private calibAttempts: number = 0;
+  // panel width in vp as actually rendered, reported by the page. The display
+  // object's width/height do not reliably swap on rotation on every build, so
+  // this measured value is the source of truth for which axis we currently
+  // span and how wide to resize the panel.
+  private lastAreaW: number = 0;
+  private relayoutTimer: number = -1;
+  private lastMismatchSig: string = '';
+  private resizeGiveups: number = 0;
 
   private composition: string = '';
   private baseCands: Cand[] = [];
@@ -94,6 +111,15 @@ class MixedController {
   private physicalPinyin: boolean = true;
   // index (into candidates) highlighted via arrow keys; -1 = nothing picked
   private selCand: number = -1;
+  // active "raw digit" prediction round: the digit already committed to the
+  // editor whose dictionary extensions are offered (e.g. after 8, the dict
+  // suggests "8," / "8."). Accepting one must REPLACE that digit (delete it
+  // first), not append — typing 8 and accepting "8," yields "8," not "88,".
+  // Empty = no such round.
+  private rawRound: string = '';
+  // true while commitRawChoice commits the replacement text, so the digit
+  // branch does not immediately re-arm the round it is trying to close
+  private roundCommitting: boolean = false;
 
   /**
    * Arrow-key candidate navigation over all candidates, including the
@@ -132,7 +158,11 @@ class MixedController {
   public onTogglePhysicalPinyin(): void {
     this.physicalPinyin = !this.physicalPinyin;
     this.selCand = -1;
-    if (!this.physicalPinyin && this.composition.length > 0) {
+    this.rawRound = '';
+    if (!this.physicalPinyin) {
+      // entering EN always clears composing AND any lingering related-word
+      // suggestions from the last 漢 commit — stale predictions would make
+      // the first Space commit one of them
       this.composition = '';
       this.baseCands = [];
       this.candidates = [];
@@ -194,7 +224,7 @@ class MixedController {
     if (code === KC_SPACE) {
       if (this.selCand >= 0 && this.selCand < this.candidates.length) {
         // Space/Enter commit the arrow-highlighted candidate
-        this.commitText(this.candidates[this.selCand].text);
+        this.commitText(this.candidates[this.selCand].text, true);
         return true;
       }
       if (this.composition.length > 0) {
@@ -239,7 +269,7 @@ class MixedController {
     }
     if (code === KC_ENTER) {
       if (this.selCand >= 0 && this.selCand < this.candidates.length) {
-        this.commitText(this.candidates[this.selCand].text);
+        this.commitText(this.candidates[this.selCand].text, true);
         return true;
       }
       if (this.composition.length > 0) {
@@ -257,7 +287,7 @@ class MixedController {
   }
 
   public onCreate(context: InputMethodExtensionContext): void {
-    console.info(`${TAG} onCreate enter`);
+    console.info(`${TAG} onCreate enter — build ${MixedController.STAMP}`);
     this.context = context;
     try {
       dictEngine.setResourceManager(context.resourceManager);
@@ -287,9 +317,23 @@ class MixedController {
       }
     }
     console.info(`${TAG} onCreate done`);
+    // pre-warm the ASCII phrase bucket (digits' home) off the hot path so
+    // the first typed digit never pays the ~0.6MB sync parse
+    setTimeout(() => {
+      const t0 = Date.now();
+      dictEngine.predict('0');
+      console.info(`${TAG} phrase bucket prewarmed in ${Date.now() - t0}ms`);
+    }, 4000);
   }
 
   public onDestroy(): void {
+    if (this.relayoutTimer !== -1) {
+      clearTimeout(this.relayoutTimer);
+      this.relayoutTimer = -1;
+    }
+    display.off('change');
+    display.off('foldStatusChange');
+    display.off('foldDisplayModeChange');
     if (this.panel) {
       inputMethodEngine.getInputMethodAbility().destroyPanel(this.panel).catch((err: BusinessError) => {
         console.error(`${TAG} destroyPanel: ${err.code} ${err.message}`);
@@ -299,31 +343,42 @@ class MixedController {
   }
 
   /**
-   * Derive row height from the available screen so that panelHeight always
-   * equals the real content height (no blank area below the keys).
+   * Derive the panel geometry from the LIVE display every time it runs, so
+   * any device / orientation / fold state lays out from fractions of the real
+   * screen instead of per-device constants. Orientation is resolved from the
+   * panel's own measured width when the page has reported one (display
+   * width/height do not reliably swap on rotation).
    */
   private applyLayout(): void {
     const dis = display.getDefaultDisplaySync();
     const density: number = dis.densityPixels > 0 ? dis.densityPixels : 1;
-    const isLandscape: boolean = dis.width > dis.height;
-    const verticalVp: number = Math.floor(dis.height / density);
-    const shortAxisVp: number = Math.floor(Math.min(dis.width, dis.height) / density);
+    const longPx: number = Math.max(dis.width, dis.height);
+    const shortPx: number = Math.min(dis.width, dis.height);
+    const longAxisVp: number = Math.floor(longPx / density);
+    const shortAxisVp: number = Math.floor(shortPx / density);
+    // Rotation is the authoritative orientation signal. Do NOT decide from
+    // the measured panel width alone: it goes stale across a fold (a
+    // trifold-landscape width numerically matches the folded display's long
+    // axis, which misdetected landscape and demanded an impossible
+    // 2232px-wide resize that failed 12800008 forever).
+    const isLandscape: boolean = dis.rotation === 1 || dis.rotation === 3;
+    // the screen's height in the CURRENT orientation drives row sizing
+    const verticalVp: number = isLandscape ? shortAxisVp : longAxisVp;
     this.expandedScreen = shortAxisVp >= EXPANDED_MIN_SHORT_AXIS_VP;
-    let chrome: number = NON_ROW_VP;
+    const chrome: number = this.expandedScreen ? CELIA_CHROME_VP : NON_ROW_VP;
     let rowH: number;
     if (this.expandedScreen) {
-      // exact Celia geometry (see CELIA_* constants above)
-      chrome = CELIA_CHROME_VP;
-      if (isLandscape) {
-        rowH = CELIA_ROW_VP;
-      } else {
-        rowH = Math.floor((Math.floor(CELIA_PORTRAIT_RATE * verticalVp) - chrome) / 4);
-        if (rowH < 40) {
-          rowH = 40;
-        }
+      // Celia-style: the whole keyboard takes ~40% of the current screen
+      // height, rows clamped so mid-size tablets stay tappable and huge ones
+      // don't grow giant keys
+      rowH = Math.floor((Math.floor(CELIA_HEIGHT_RATE * verticalVp) - chrome) / 4);
+      if (rowH < EXPANDED_MIN_ROW_VP) {
+        rowH = EXPANDED_MIN_ROW_VP;
+      } else if (rowH > EXPANDED_MAX_ROW_VP) {
+        rowH = EXPANDED_MAX_ROW_VP;
       }
     } else {
-      let budget: number = isLandscape
+      const budget: number = isLandscape
         ? Math.min(0.5 * verticalVp, NON_ROW_VP + 4 * 30)
         : Math.min(0.42 * verticalVp, NON_ROW_VP + 4 * MAX_ROW_VP);
       rowH = Math.floor((budget - NON_ROW_VP) / 4);
@@ -334,16 +389,20 @@ class MixedController {
       }
     }
     this.rowHeight = rowH;
-    this.panelWidth = Math.floor(dis.width / density);
+    // the measured width is only a refinement: trust it when it agrees with
+    // the rotation-implied axis (within 5%), otherwise fall back to the axis
+    const impliedWpx: number = isLandscape ? longPx : shortPx;
+    this.panelWidth = this.lastAreaW > 0
+      && Math.abs(this.lastAreaW * density - impliedWpx) <= impliedWpx * 0.05
+      ? this.lastAreaW
+      : impliedWpx / density;
     this.basePanelHeight = chrome + rowH * 4;
     // resize() is applied in PHYSICAL pixels, not vp: a resize(350, 270) for
     // 270vp produced a 270-px window (94vp) on a density-2.875 screen.
     this.densityPx = density;
-    this.panelWidthPx = dis.width;
+    this.panelWidthPx = Math.round(this.panelWidth * density);
     this.applyPanelSize();
-    this.measuredHeight = 0;
-    this.calibAttempts = 0;
-    console.info(`${TAG} applyLayout: ${dis.width}x${dis.height} d${density} row ${rowH}vp panel ${this.panelWidth}x${this.panelHeight}vp (${this.panelWidthPx}x${this.panelHeightPx}px)`);
+    console.info(`${TAG} applyLayout: ${dis.width}x${dis.height} rot${dis.rotation} d${density} ${isLandscape ? 'landscape' : 'portrait'} short ${shortAxisVp}vp row ${rowH}vp panel ${this.panelWidth}x${this.panelHeight}vp (${this.panelWidthPx}x${this.panelHeightPx}px)`);
   }
 
   /**
@@ -367,41 +426,72 @@ class MixedController {
   }
 
   /**
-   * The keyboard page reports its real rendered height here. Row height is
-   * fitted to whatever window the system actually gave us (so rows can never
-   * be clipped), and if that window is smaller than requested we re-resize
-   * once with a height scaled by the wanted/got ratio (covers unit or clamp
-   * differences between our request and the window manager's interpretation).
+   * The keyboard page reports its real rendered size here (vp). This is the
+   * self-healing feedback loop: if the actual window no longer matches the
+   * metrics we laid out with — exactly what a rotation or fold change looks
+   * like when the display events fire late or not at all — we recompute the
+   * layout from live values. calibAttempts is only reset once the reported
+   * area settles on our expected metrics, so the loop is bounded.
    */
-  public onContentArea(heightVp: number): void {
-    if (heightVp <= 0) {
+  public onContentArea(widthVp: number, heightVp: number): void {
+    if (heightVp <= 0 || widthVp <= 0) {
       return;
     }
+    const widthChanged: boolean = Math.abs(widthVp - this.lastAreaW) > 2;
+    this.lastAreaW = widthVp;
+    const chrome: number = this.expandedScreen ? CELIA_CHROME_VP : NON_ROW_VP;
+    const minRow: number = this.expandedScreen ? EXPANDED_MIN_ROW_VP : MIN_ROW_VP;
+    const maxRow: number = this.expandedScreen ? EXPANDED_MAX_ROW_VP : MAX_ROW_VP;
     if (this.isCollapsed()) {
-      // collapsed bar: its height is fixed, no row fitting / calibration
+      // collapsed bar: fixed height, but a rotation still swaps the width
+      if (widthChanged && this.calibAttempts < 3 && Math.abs(widthVp - this.panelWidth) > 12) {
+        this.calibAttempts++;
+        this.applyLayout();
+      }
       return;
     }
     this.measuredHeight = heightVp;
-    if (!this.expandedScreen) {
-      // phone layouts: fit rows to whatever window the system actually gave us
-      let rowH: number = Math.floor((heightVp - NON_ROW_VP) / 4);
-      if (rowH < MIN_ROW_VP) {
-        rowH = MIN_ROW_VP;
-      } else if (rowH > MAX_ROW_VP) {
-        rowH = MAX_ROW_VP;
-      }
-      if (rowH !== this.rowHeight) {
-        this.rowHeight = rowH;
-      }
+    // fit rows to the window the system ACTUALLY granted, on every device
+    // class: when a fold/rotate race or a system clamp leaves the window
+    // smaller (or larger) than requested, the content adapts instead of
+    // overflowing (which clipped the candidate bar at the top)
+    let rowH: number = Math.floor((heightVp - chrome) / 4);
+    if (rowH < minRow) {
+      rowH = minRow;
+    } else if (rowH > maxRow) {
+      rowH = maxRow;
     }
-    console.info(`${TAG} onContentArea measured ${heightVp}vp row ${this.rowHeight}vp`);
-    this.notifyUi();
-    if (this.panel && this.calibAttempts < 2 && Math.abs(heightVp - this.panelHeight) > 8) {
+    if (rowH !== this.rowHeight) {
+      this.rowHeight = rowH;
+    }
+    const mismatchSig: string = `${Math.round(widthVp)}x${Math.round(heightVp)}->${Math.round(this.panelWidth)}x${Math.round(this.panelHeight)}`;
+    const settled: boolean = Math.abs(widthVp - this.panelWidth) <= 12
+      && Math.abs(heightVp - this.panelHeight) <= 8;
+    if (settled) {
+      this.calibAttempts = 0;
+      this.lastMismatchSig = '';
+    } else if (this.calibAttempts < 3) {
       this.calibAttempts++;
-      let corrected: number = this.panelHeightPx;
-      if (heightVp < this.panelHeight) {
-        corrected = Math.round(this.panelHeightPx * (this.panelHeight / heightVp));
-      }
+      console.info(`${TAG} onContentArea mismatch ${widthVp}x${heightVp} vs ${this.panelWidth}x${this.panelHeight}vp: relayout (${this.calibAttempts})`);
+      this.applyLayout();
+      this.notifyUi();
+      return;
+    } else if (mismatchSig !== this.lastMismatchSig) {
+      // geometry changed AGAIN after the budget ran out (next stage of a
+      // fold animation, density change): take one more run at it
+      this.lastMismatchSig = mismatchSig;
+      this.calibAttempts = 1;
+      this.applyLayout();
+      this.notifyUi();
+      return;
+    }
+    console.info(`${TAG} onContentArea measured ${widthVp}x${heightVp}vp row ${this.rowHeight}vp`);
+    this.notifyUi();
+    if (this.panel && this.calibAttempts < 2 && heightVp < this.panelHeight - 8) {
+      // the system clamped the window smaller than requested: re-resize once
+      // scaled by the wanted/got ratio (covers unit or clamp differences)
+      this.calibAttempts++;
+      const corrected: number = Math.round(this.panelHeightPx * (this.panelHeight / heightVp));
       console.info(`${TAG} calibrating resize: ${this.panelHeightPx} -> ${corrected}`);
       this.resizeWithRetry(this.panelWidthPx, corrected, 1);
     }
@@ -436,7 +526,9 @@ class MixedController {
             console.info(`${TAG} panel show event`);
             this.panelShown = true;
             this.calibAttempts = 0;
-            this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1);
+            // re-derive from live metrics: rotation/fold may have happened
+            // while the panel was hidden and no area report will correct us
+            this.applyLayout();
           });
           kb.on('hide', () => {
             console.info(`${TAG} panel hide event`);
@@ -473,6 +565,7 @@ class MixedController {
       return Promise.resolve();
     }
     return this.panel.resize(width, height).then(() => {
+      this.resizeGiveups = 0;
       console.info(`${TAG} resize ok (attempt ${attempt})`);
     }).catch((err: BusinessError) => {
       console.error(`${TAG} resize attempt ${attempt} failed: code ${err.code}`);
@@ -482,8 +575,29 @@ class MixedController {
         }).then(() => this.resizeWithRetry(width, height, attempt + 1));
       }
       console.error(`${TAG} resize giving up`);
+      this.recoverFromResizeFailure();
       return Promise.resolve();
     });
+  }
+
+  /**
+   * After a resize exhausted its retries, self-heal: re-derive the layout
+   * with a growing backoff. Valid arguments should never land here; this
+   * covers system races. Bounded at 3 rounds — beyond that, wait for the
+   * next real geometry event (which resets the counter).
+   */
+  private recoverFromResizeFailure(): void {
+    if (this.resizeGiveups >= 3) {
+      return;
+    }
+    this.resizeGiveups++;
+    const delay: number = 1500 * this.resizeGiveups;
+    setTimeout(() => {
+      console.info(`${TAG} resize-failure recovery relayout (${this.resizeGiveups})`);
+      this.calibAttempts = 0;
+      this.applyLayout();
+      this.notifyUi();
+    }, delay);
   }
 
   private registerListener(): void {
@@ -494,20 +608,36 @@ class MixedController {
       this.kbController = kbController;
       this.inputClient = inputClient;
       this.resetComposition();
+      // cheap safety net: geometry changes that happened while no editor was
+      // focused (and possibly while the panel was hidden) get picked up here
+      this.scheduleRelayout();
     });
     ability.on('inputStop', () => {
       console.info(`${TAG} inputStop`);
       this.resetComposition();
     });
-    display.on('change', () => {
+    // any display geometry change funnels into ONE debounced relayout;
+    // 'change' alone misses fold transitions and rotations on some builds
+    display.on('change', () => this.scheduleRelayout());
+    display.on('foldStatusChange', () => this.scheduleRelayout());
+    display.on('foldDisplayModeChange', () => this.scheduleRelayout());
+  }
+
+  /** Coalesce bursty display events into a single relayout pass. */
+  private scheduleRelayout(): void {
+    if (this.relayoutTimer !== -1) {
+      return;
+    }
+    this.relayoutTimer = setTimeout(() => {
+      this.relayoutTimer = -1;
+      // a genuine geometry event grants a fresh correction budget: the
+      // transitional (mid-fold / mid-rotate) area reports that follow must
+      // not permanently exhaust it
+      this.calibAttempts = 0;
+      this.resizeGiveups = 0;
       this.applyLayout();
-      if (this.panel) {
-        this.panel.resize(this.panelWidthPx, this.panelHeightPx).catch((err: BusinessError) => {
-          console.error(`${TAG} resizePanel: ${err.code} ${err.message}`);
-        });
-      }
       this.notifyUi();
-    });
+    }, 300);
   }
 
   /**
@@ -585,14 +715,14 @@ class MixedController {
     this.uiListener = listener;
     if (listener) {
       listener(this.composition, this.candidates, this.predicting, this.shiftOn, this.rowHeight,
-        this.isCollapsed(), this.physicalKbActive, this.physicalPinyin, this.selCand);
+        this.expandedScreen, this.isCollapsed(), this.physicalKbActive, this.physicalPinyin, this.selCand);
     }
   }
 
   private notifyUi(): void {
     if (this.uiListener) {
       this.uiListener(this.composition, this.candidates, this.predicting, this.shiftOn, this.rowHeight,
-        this.isCollapsed(), this.physicalKbActive, this.physicalPinyin, this.selCand);
+        this.expandedScreen, this.isCollapsed(), this.physicalKbActive, this.physicalPinyin, this.selCand);
     }
   }
 
@@ -603,6 +733,7 @@ class MixedController {
     this.predicting = false;
     this.shiftOn = false;
     this.selCand = -1;
+    this.rawRound = '';
     this.notifyUi();
   }
 
@@ -660,18 +791,29 @@ class MixedController {
     this.notifyUi();
   }
 
-  /** Space: commit the first dictionary candidate, else the raw code, else a space. */
+  /** Space: commit the first dictionary candidate, else the raw code, else a space.
+   * In EN mode it is ALWAYS a plain space — the related-word rule below is a
+   * Chinese-typing behavior and once inserted dictionary predictions like
+   * "8," instead of the space (typing 8 then space produced "88,"). */
   public onSpace(): void {
+    if (!this.physicalPinyin) {
+      this.commitText(' ');
+      return;
+    }
     if (this.composition.length > 0) {
       if (this.baseCands.length > 0) {
-        this.commitText(this.baseCands[0].text);
+        this.commitText(this.baseCands[0].text, true);
       } else {
         this.commitText(this.rawCand().text);
       }
       return;
     }
     if (this.predicting && this.candidates.length > 0) {
-      this.commitText(this.candidates[0].text);
+      if (this.rawRound !== '') {
+        this.commitRawChoice(this.candidates[0].text);
+      } else {
+        this.commitText(this.candidates[0].text, true);
+      }
       return;
     }
     this.commitText(' ');
@@ -749,6 +891,7 @@ class MixedController {
     }
     this.predicting = false;
     this.candidates = [];
+    this.rawRound = '';
     const client = this.inputClient;
     if (client) {
       try {
@@ -794,7 +937,11 @@ class MixedController {
 
   public chooseCandidate(index: number): void {
     if (index >= 0 && index < this.candidates.length) {
-      this.commitText(this.candidates[index].text);
+      if (this.rawRound !== '') {
+        this.commitRawChoice(this.candidates[index].text);
+      } else {
+        this.commitText(this.candidates[index].text, true);
+      }
     }
   }
 
@@ -823,7 +970,7 @@ class MixedController {
     return ch;
   }
 
-  private commitText(text: string): void {
+  private commitText(text: string, predictRelated: boolean = false): void {
     console.info(`${TAG} commitText "${text}" hasClient=${this.inputClient !== undefined}`);
     if (this.inputClient) {
       this.inputClient.insertText(text).then((done: boolean) => {
@@ -839,16 +986,105 @@ class MixedController {
     this.baseCands = [];
     this.shiftOn = false;
     this.selCand = -1;
-    // related-word prediction (phrase_N.ms2) for the word just committed
-    const predictions: Cand[] = dictEngine.predict(committed);
-    if (predictions.length > 0) {
-      this.predicting = true;
-      this.candidates = predictions;
+    // related-word prediction (phrase_N.ms2) ONLY after committing a real
+    // Chinese candidate (predictRelated). Raw output — punctuation, raw
+    // English, plain spaces — never arms predictions. EXCEPTION (user
+    // design): in 漢 mode a committed DIGIT opens a deliberate round — the
+    // digit itself is the FIRST chip (one Space confirms what was typed),
+    // followed by the dict's digit-string entries ("8," "8." …); accepting
+    // one of those REPLACES the digit (see commitRawChoice), so 8 + "8,"
+    // yields "8," not "88,".
+    if (predictRelated && this.physicalPinyin) {
+      const predictions: Cand[] = dictEngine.predict(committed);
+      if (predictions.length > 0) {
+        this.predicting = true;
+        this.candidates = predictions;
+      } else {
+        this.predicting = false;
+        this.candidates = [];
+      }
+      this.rawRound = '';
+    } else if (this.physicalPinyin && !this.roundCommitting
+      && committed.length === 1 && committed >= '0' && committed <= '9') {
+      const digitSelf = new Cand();
+      digitSelf.isRaw = true;
+      digitSelf.text = committed;
+      const seen: Set<string> = new Set<string>([committed]);
+      const exts: Cand[] = [];
+      for (const c of dictEngine.predict(committed)) {
+        if (seen.has(c.text)) {
+          continue;
+        }
+        seen.add(c.text);
+        const one = new Cand();
+        one.isRaw = false;
+        one.text = c.text;
+        exts.push(one);
+      }
+      if (exts.length > 0) {
+        this.rawRound = committed;
+        this.candidates = [digitSelf].concat(exts);
+        this.predicting = true;
+        console.info(`${TAG} digit round armed: ${committed} + ${exts.length} ext`);
+      } else {
+        // no dictionary extensions for this digit: no round at all, the next
+        // Space is an ordinary space
+        this.rawRound = '';
+        this.predicting = false;
+        this.candidates = [];
+      }
     } else {
+      this.rawRound = '';
       this.predicting = false;
       this.candidates = [];
     }
     this.notifyUi();
+  }
+
+  /**
+   * Accept a digit-round chip. Confirm (chip == the typed digit): the digit
+   * already sits in the editor — do NOTHING to the text, just close the
+   * round. Replace (a longer entry like "8,"): delete the digit first
+   * (async — the sync delete natively crashed the IME on some editors),
+   * then insert; if the delete fails we keep the digit rather than append a
+   * duplicate.
+   */
+  private commitRawChoice(text: string): void {
+    const client = this.inputClient;
+    const digit: string = this.rawRound;
+    this.rawRound = '';
+    if (text === digit) {
+      this.predicting = false;
+      this.candidates = [];
+      this.notifyUi();
+      return;
+    }
+    const closeRound = (): void => {
+      this.predicting = false;
+      this.candidates = [];
+      this.roundCommitting = false;
+      this.notifyUi();
+    };
+    const commitReplacement = (): void => {
+      this.roundCommitting = true;
+      this.commitText(text, false);
+      this.roundCommitting = false;
+    };
+    if (client) {
+      client.deleteBackward(digit.length).then((done: boolean) => {
+        if (done) {
+          commitReplacement();
+        } else {
+          console.warn(`${TAG} raw-round delete refused; keeping "${digit}"`);
+          closeRound();
+        }
+      }).catch((err: BusinessError) => {
+        console.error(`${TAG} raw-round delete failed ${err.code}; keeping "${digit}"`);
+        closeRound();
+      });
+    } else {
+      commitReplacement();
+    }
   }
 }
 

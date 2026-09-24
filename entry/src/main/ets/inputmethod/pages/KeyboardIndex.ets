@@ -48,13 +48,14 @@ struct KeyboardIndex {
   aboutToAppear(): void {
     this.expandedScreen = mixedController.isExpandedScreen();
     mixedController.setUiListener((comp: string, cands: Cand[], predicting: boolean,
-      shift: boolean, rowHeight: number,
+      shift: boolean, rowHeight: number, expanded: boolean,
       collapsed: boolean, physicalMode: boolean, pinyinOn: boolean, sel: number) => {
       this.composition = comp;
       this.candidates = cands;
       this.predicting = predicting;
       this.shiftOn = shift;
       this.rowHeight = rowHeight;
+      this.expandedScreen = expanded;
       this.collapsed = collapsed;
       this.physicalMode = physicalMode;
       this.physicalPinyin = pinyinOn;
@@ -149,7 +150,7 @@ struct KeyboardIndex {
     if (this.predicting) {
       return '聯想';
     }
-    return this.composition.length > 0 ? this.composition : 'hMixed';
+    return this.composition.length > 0 ? this.composition : 'Mixed KB';
   }
 
   /** Index of the candidate that Space would commit (first non-raw, else raw). */
@@ -530,9 +531,10 @@ struct KeyboardIndex {
     .backgroundColor(this.collapsed ? BG_BAR : BG_PANEL)
     .alignItems(HorizontalAlign.Start)
     .onAreaChange((_oldValue: Area, newValue: Area) => {
+      const w: number = Number(newValue.width);
       const h: number = Number(newValue.height);
-      if (h > 0) {
-        mixedController.onContentArea(h);
+      if (h > 0 && w > 0) {
+        mixedController.onContentArea(w, h);
       }
     })
   }
