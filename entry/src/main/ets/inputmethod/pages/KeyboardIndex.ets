@@ -1,5 +1,8 @@
 import { Cand } from '../model/DictEngine';
 import { mixedController } from '../model/MixedController';
+import { window, display } from '@kit.ArkUI';
+import { common } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 
 const LETTER_ROW_1: string[] = ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'];
 const LETTER_ROW_2: string[] = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'];
@@ -23,6 +26,10 @@ const FG_TEXT: string = '#1A1C1E';
 // hold a key for 1 s and it keeps repeating every 100 ms until released
 const REPEAT_DELAY: number = 1000;
 const REPEAT_MS: number = 100;
+// Fallback dock/taskbar height (vp) for 2-in-1 PC mode when the system
+// neither places the panel above the dock nor reports it via avoid-area.
+// Tune this so the candidate bar sits just above the dock with no overlap.
+const DOCK_FALLBACK_VP: number = 40;
 
 @Entry
 @Component
@@ -40,10 +47,16 @@ struct KeyboardIndex {
   @State physicalPinyin: boolean = true;
   @State selCand: number = -1;
   @State expandedScreen: boolean = false;
+  @State bottomInset: number = 0;
 
   private repeatTimer: number = -1;
   private repeating: string = '';
   private chipScroller: Scroller = new Scroller();
+  // handle to the floating panel window, cached for moveWindowTo / startMoving
+  private kbWindow: window.Window | undefined;
+  // geometry key under which the floating bar was last auto-positioned, so a
+  // user drag is not snapped back on every area-change callback
+  private lastPlacedKey: string = '';
 
   aboutToAppear(): void {
     this.expandedScreen = mixedController.isExpandedScreen();
@@ -71,6 +84,94 @@ struct KeyboardIndex {
           }
         }, 30);
       }
+    });
+    this.setupDockAwareness();
+  }
+
+  /**
+   * On 2-in-1 with a physical keyboard attached the candidate bar is a slim
+   * floating freeform window: cache its handle, park it just above the desktop
+   * dock, and expose a drag handle (startMoving) so the user can place it
+   * anywhere. The full keyboard (rare here) still uses the avoid-area inset.
+   */
+  private setupDockAwareness(): void {
+    setTimeout(() => {
+      this.refreshDockInset();
+    }, 50);
+  }
+
+  private refreshDockInset(): void {
+    try {
+      const host: common.BaseContext | undefined =
+        this.getUIContext().getHostContext() as common.BaseContext;
+      if (!host) {
+        return;
+      }
+      window.getLastWindow(host).then((win: window.Window) => {
+        this.kbWindow = win;
+        const dis = display.getDefaultDisplaySync();
+        const dockPx: number = this.readDockPx(win);
+        if (this.collapsed) {
+          // floating bar: the whole window is positioned above the dock, so no
+          // in-window transparent inset is needed
+          this.bottomInset = 0;
+          this.positionFloatingBar(win, dis, dockPx);
+        } else {
+          const insetVp: number = px2vp(dockPx) > DOCK_FALLBACK_VP ? px2vp(dockPx) : DOCK_FALLBACK_VP;
+          if (Math.abs(insetVp - this.bottomInset) >= 1) {
+            this.bottomInset = insetVp;
+            mixedController.setBottomInset(insetVp);
+          }
+        }
+      }).catch((e: BusinessError) => {
+        console.warn(`dock getLastWindow failed ${e.code}`);
+      });
+    } catch (e) {
+      console.warn('refreshDockInset failed');
+    }
+  }
+
+  private readDockPx(win: window.Window): number {
+    const nav: number =
+      win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR).bottomRect.height;
+    const sys: number =
+      win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM).bottomRect.height;
+    return nav > sys ? nav : sys;
+  }
+
+  /** Park the floating bar near the right edge, just above the dock. Waits
+   *  until the window has actually shrunk to the slim size, and runs once per
+   *  screen geometry so a manual drag is not snapped back. */
+  private positionFloatingBar(win: window.Window, dis: display.Display, dockPx: number): void {
+    const wr = win.getWindowProperties().windowRect;
+    if (wr.width > dis.width * 0.6) {
+      return; // window has not resized to the slim bar yet
+    }
+    const key: string = `${dis.width}x${dis.height}`;
+    if (this.lastPlacedKey === key) {
+      return;
+    }
+    this.lastPlacedKey = key;
+    const allow: number = dockPx > 20 ? dockPx : 72;
+    const left: number = Math.max(0, dis.width - wr.width - 16);
+    const top: number = Math.max(0, dis.height - allow - wr.height - 8);
+    win.moveWindowTo(left, top).then(() => {
+      console.info(`floating bar parked at ${left},${top}`);
+    }).catch((e: BusinessError) => {
+      console.warn(`moveWindowTo failed ${e.code}`);
+    });
+  }
+
+  /** Hand the bar to the system freeform mover (PC-mode window dragging). */
+  private startBarDrag(): void {
+    const win = this.kbWindow;
+    if (!win) {
+      return;
+    }
+    win.startMoving().then(() => {
+      console.info('bar startMoving ok');
+    }).catch((e: BusinessError) => {
+      console.warn(`startMoving failed ${e.code}`);
     });
   }
 
@@ -306,10 +407,30 @@ struct KeyboardIndex {
       })
   }
 
-  /** Slim bar while a physical keyboard is attached: chips + ^ restore. */
+  /** Grip that hands the floating bar to the system freeform mover. */
+  @Builder
+  DragHandle() {
+    Text('⠿')
+      .fontSize(18)
+      .fontColor(FG_TEXT)
+      .textAlign(TextAlign.Center)
+      .backgroundColor(this.keyBg(BG_FUNC, 'drag'))
+      .borderRadius(6)
+      .width(30)
+      .height(36)
+      .margin({ left: 6, right: 4 })
+      .onTouch((e: TouchEvent) => {
+        if (e.type === TouchType.Down) {
+          this.startBarDrag();
+        }
+      })
+  }
+
+  /** Slim bar while a physical keyboard is attached: grip + chips + ^ restore. */
   @Builder
   CollapsedBar() {
     Row() {
+      this.DragHandle()
       this.Chips()
       if (this.physicalMode) {
         this.PinyinModeButton()
@@ -317,7 +438,7 @@ struct KeyboardIndex {
       this.CollapseButton('^')
     }
     .width('100%')
-    .height('100%')
+    .height(56)
     .backgroundColor(BG_BAR)
     .alignItems(VerticalAlign.Center)
   }
@@ -505,37 +626,63 @@ struct KeyboardIndex {
   }
 
   build() {
-    Column() {
-      if (this.collapsed) {
+    if (this.collapsed) {
+      // slim floating candidate bar fills its freeform window; positioned above
+      // the dock and draggable via the grip handle
+      Column() {
         this.CollapsedBar()
-      } else {
-        this.CandidateBar()
-        Column({ space: 1 }) {
-          this.LetterRows()
-          Row({ space: 1 }) {
-            // Celia bottom row order (measured on-device): 符号 | 英/中 | , | space | . | 123 | Enter
-            this.ModeKey()
-            this.PinyinKey()
-            this.PuncKey(',')
-            this.SpaceKey()
-            this.PuncKey('.')
-            this.EnterKey()
-          }
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor(BG_BAR)
+      .alignItems(HorizontalAlign.Start)
+      .onAreaChange((_oldValue: Area, newValue: Area) => {
+        const w: number = Number(newValue.width);
+        const h: number = Number(newValue.height);
+        if (h > 0 && w > 0) {
+          this.refreshDockInset();
+          mixedController.onContentArea(w, h);
         }
-        .padding(this.expandedScreen ? { left: 24, right: 24, top: 2, bottom: 2 }
-          : { left: 4, right: 4, top: 2, bottom: 2 })
+      })
+    } else {
+      Column() {
+        Column() {
+          this.CandidateBar()
+          Column({ space: 1 }) {
+            this.LetterRows()
+            Row({ space: 1 }) {
+              // Celia bottom row order (measured on-device): 符号 | 英/中 | , | space | . | 123 | Enter
+              this.ModeKey()
+              this.PinyinKey()
+              this.PuncKey(',')
+              this.SpaceKey()
+              this.PuncKey('.')
+              this.EnterKey()
+            }
+          }
+          .padding(this.expandedScreen ? { left: 24, right: 24, top: 2, bottom: 2 }
+            : { left: 4, right: 4, top: 2, bottom: 2 })
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .backgroundColor(BG_PANEL)
+        // transparent strip the height of the dock / navigation indicator, so
+        // the opaque keyboard sits above it instead of covering the dock
+        Blank().height(this.bottomInset)
       }
+      .width('100%')
+      .height('100%')
+      .justifyContent(FlexAlign.Start)
+      .alignItems(HorizontalAlign.Start)
+      .backgroundColor(Color.Transparent)
+      .onAreaChange((_oldValue: Area, newValue: Area) => {
+        const w: number = Number(newValue.width);
+        const h: number = Number(newValue.height);
+        if (h > 0 && w > 0) {
+          this.refreshDockInset();
+          mixedController.onContentArea(w, h);
+        }
+      })
     }
-    .width('100%')
-    .height('100%')
-    .backgroundColor(this.collapsed ? BG_BAR : BG_PANEL)
-    .alignItems(HorizontalAlign.Start)
-    .onAreaChange((_oldValue: Area, newValue: Area) => {
-      const w: number = Number(newValue.width);
-      const h: number = Number(newValue.height);
-      if (h > 0 && w > 0) {
-        mixedController.onContentArea(w, h);
-      }
-    })
   }
 }

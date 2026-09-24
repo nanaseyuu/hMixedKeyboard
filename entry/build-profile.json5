@@ -20,14 +20,33 @@
           }
         }
       }
-    },
+    }
   ],
   "targets": [
     {
-      "name": "default"
+      "name": "default",
+      "config": {
+        "deviceType": [
+          "phone",
+          "tablet",
+          "2in1",
+          "car",
+          "wearable",
+          "tv"
+        ],
+        "buildOption": {
+          "arkOptions": {
+            "obfuscation": {
+              "ruleOptions": {
+                "enable": false
+              }
+            }
+          }
+        }
+      }
     },
     {
-      "name": "ohosTest",
+      "name": "ohosTest"
     }
   ]
 }

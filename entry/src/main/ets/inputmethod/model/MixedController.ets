@@ -34,6 +34,9 @@ const EXPANDED_MIN_SHORT_AXIS_VP: number = 550;
 // and auto re-show if the bar ever gets hidden while an editor is attached.
 const PHYSICAL_KB_PIN_ENABLED: boolean = true;
 const COLLAPSED_VP: number = 60;
+// The physical-keyboard candidate bar is a slim freeform strip: one third of
+// the screen wide, draggable, parked just above the desktop dock.
+const COLLAPSED_WIDTH_FRACTION: number = 1 / 3;
 // physical key capture via KeyboardDelegate.on('keyEvent'): with the pad's
 // keyboard attached, typed letters build the pinyin composition and the
 // candidate bar offers Chinese, while Space/Backspace/Enter act on it.
@@ -61,7 +64,7 @@ class MixedController {
   // build identifier logged in onCreate: hilog "build <stamp>" proves which
   // bundle the LIVE service actually runs (install -r does not always
   // restart a running input-method service)
-  static readonly STAMP: string = 'jyut-size 2026-09-24';
+  static readonly STAMP: string = 'floating-drag 2026-09-24';
   private context: InputMethodExtensionContext | undefined;
   private panel: inputMethodEngine.Panel | undefined;
   private kbController: inputMethodEngine.KeyboardController | undefined;
@@ -71,7 +74,17 @@ class MixedController {
   private panelHeight: number = 0;
   private panelWidthPx: number = 0;
   private panelHeightPx: number = 0;
+  // width (px) of the slim floating candidate bar when a physical keyboard is
+  // attached (COLLAPSED_WIDTH_FRACTION of the screen width)
+  private collapsedWidthPx: number = 0;
+  // full-screen panel width (px) for the expanded keyboard
+  private fullWidthPx: number = 0;
   private densityPx: number = 1;
+  // bottom navigation-indicator / dock avoid-area height (vp) reported by the
+  // page; the panel window is grown by this much and the page renders a
+  // transparent spacer of the same height so the keys sit ABOVE the dock
+  // instead of covering it. 0 on devices whose panel already avoids it.
+  private bottomInset: number = 0;
   private rowHeight: number = 46;
   private measuredHeight: number = 0;
   private calibAttempts: number = 0;
@@ -385,6 +398,8 @@ class MixedController {
     // 270vp produced a 270-px window (94vp) on a density-2.875 screen.
     this.densityPx = density;
     this.panelWidthPx = Math.round(this.panelWidth * density);
+    this.fullWidthPx = this.panelWidthPx;
+    this.collapsedWidthPx = Math.round(this.panelWidth * COLLAPSED_WIDTH_FRACTION * density);
     this.applyPanelSize();
     console.info(`${TAG} applyLayout: ${dis.width}x${dis.height} rot${dis.rotation} d${density} ${isLandscape ? 'landscape' : 'portrait'} ${isPhoneLandscape ? 'phone-landscape ' : ''}width ${Math.floor(widthPt)}pt row ${this.rowHeight}pt panel ${this.panelWidth}x${this.panelHeight}vp (${this.panelWidthPx}x${this.panelHeightPx}px)`);
   }
@@ -394,7 +409,17 @@ class MixedController {
    * candidate bar while a physical keyboard is attached.
    */
   private applyPanelSize(): void {
-    this.panelHeight = this.isCollapsed() ? COLLAPSED_VP : this.basePanelHeight;
+    if (this.isCollapsed()) {
+      // floating candidate bar: slim width, no dock inset (the page positions
+      // the whole freeform window above the dock and lets the user drag it)
+      this.panelWidthPx = this.collapsedWidthPx;
+      this.panelWidth = this.collapsedWidthPx / this.densityPx;
+      this.panelHeight = COLLAPSED_VP;
+    } else {
+      this.panelWidthPx = this.fullWidthPx;
+      this.panelWidth = this.fullWidthPx / this.densityPx;
+      this.panelHeight = this.basePanelHeight + this.bottomInset;
+    }
     this.panelHeightPx = Math.round(this.panelHeight * this.densityPx);
     if (this.panel && this.panelShown) {
       this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1);
@@ -406,7 +431,24 @@ class MixedController {
   public onToggleCollapse(): void {
     this.kbExpanded = !this.kbExpanded;
     console.info(`${TAG} collapse toggle -> expanded=${this.kbExpanded}`);
-    this.applyPanelSize();
+    this.applyLayout();
+  }
+
+  /**
+   * Bottom dock / navigation-indicator height (vp) measured by the page. The
+   * panel window is grown by this amount and the page paints a transparent
+   * spacer of the same height at its base, so the keyboard/candidate bar
+   * renders above the dock rather than on top of it.
+   */
+  public setBottomInset(vp: number): void {
+    const next: number = vp > 0 ? vp : 0;
+    if (Math.abs(next - this.bottomInset) < 1) {
+      return;
+    }
+    console.info(`${TAG} bottomInset ${this.bottomInset} -> ${next} vp`);
+    this.bottomInset = next;
+    this.calibAttempts = 0;
+    this.applyLayout();
   }
 
   /**
@@ -438,8 +480,9 @@ class MixedController {
     // fit rows to the window the system ACTUALLY granted, on every device
     // class: when a fold/rotate race or a system clamp leaves the window
     // smaller (or larger) than requested, the content adapts instead of
-    // overflowing (which clipped the candidate bar at the top)
-    let rowH: number = Math.floor((heightVp - chrome) / 4);
+    // overflowing (which clipped the candidate bar at the top). The window was
+    // grown by bottomInset for the dock spacer, so subtract it before fitting.
+    let rowH: number = Math.floor((heightVp - chrome - this.bottomInset) / 4);
     if (rowH < minRow) {
       rowH = minRow;
     } else if (rowH > maxRow) {
@@ -489,7 +532,11 @@ class MixedController {
     this.applyLayout();
     const panelInfo: inputMethodEngine.PanelInfo = {
       type: inputMethodEngine.PanelType.SOFT_KEYBOARD,
-      flag: inputMethodEngine.PanelFlag.FLG_FIXED
+      // FLG_FLOATING: on 2-in-1 the panel is a freeform window the page can
+      // reposition (moveWindowTo) and drag (startMoving). This is what lets
+      // the slim candidate bar sit above the desktop dock instead of being
+      // system-pinned to the screen bottom.
+      flag: inputMethodEngine.PanelFlag.FLG_FLOATING
     };
     inputMethodEngine.getInputMethodAbility().createPanel(this.context, panelInfo)
       .then((panel: inputMethodEngine.Panel) => {
@@ -650,12 +697,12 @@ class MixedController {
         this.physicalKbActive = true;
         this.kbExpanded = false;
         console.info(`${TAG} physical keyboard attached: collapsing to candidate bar`);
-        this.applyPanelSize();
+        this.applyLayout();
       } else {
         this.scanPhysicalKeyboard().then((still: boolean) => {
           this.physicalKbActive = still;
           this.kbExpanded = false;
-          this.applyPanelSize();
+          this.applyLayout();
         });
       }
     });

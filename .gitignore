@@ -32,3 +32,15 @@
 /node_bounds.js
 
 /build
+
+# stray nested duplicate of the whole project (active module is ./entry)
+/hMixedKeyboard/
+# local DevEco/CodeArts cache
+/.bitfun/
+
+# DevEco signing configs (machine-local encrypted material) stay out of the
+# public repo — build-profile.example.json5 is the tracked empty template
+build-profile.json5
+
+# transient unsigned-copy of build-profile used by cli_build.bat (contains signing material)
+build-profile.local.json5
