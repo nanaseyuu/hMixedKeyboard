@@ -96,20 +96,52 @@ insert the Chinese text. ~20 lines in the existing app instead of an APK
 project. Might fail if the container ignores our deletes the way it ignores
 key consumption — an afternoon to find out. Try this BEFORE item 6.
 
-## 8. Ship the remaining bar work  — pending
-The strip-above-taskbar build (window grown by the dock inset, transparent
-touch-passing zone over the taskbar, stamp `strip-above5`) is in the source
-but was NEVER verified on device: deploys silently failed (see below) and the
-device kept running an older build. Still to do: verify deploy (check the
-`onCreate enter — build <stamp>` log line and that the softKeyboard window is
-~190px tall with the strip in its top part), finger-test taskbar clicks
-through the transparent zone, redeploy the same build to the Mate XTS, then
-commit and push the two modified files (MixedController.ets,
-KeyboardIndex.ets) plus this file.
-Deploy lesson: always show `hdc file send` output — piped-to-/dev/null
-transfers failed silently and `bm install` kept installing a stale
-/data/local/tmp/hmk.hap. Always verify the running build via the STAMP log
-line. The hilog buffer churns in ~10s: stream `hilog` to a local file in the
-background instead of snapshotting. Heavy install churn once flipped the IME
-to BASIC_MODE (recovered via switch to Celia → force-stop ours → `ime -e` →
-`ime -s`).
+## 8. Candidate bar as a real floating panel  — mostly done, manual test pending
+The transparent full-width band approach (v1 of the fix) was REVERTED: an
+IME system window is full-width regardless of ArkUI transparency, and
+HitTestMode games cannot pass touches to the app behind it. Final
+architecture (commit pending manual finger test):
+
+- Expanded (no physical keyboard, or `^` tapped): `FLG_FIXED` panel,
+  full width, bottom-pinned. Measured on MatePad Edge:
+  `softKeyboard2 [0, 1457, 3120, 623]`.
+- Physical keyboard attached: `FLG_FLOATING` panel, resized to 40% width
+  x COLLAPSED_VP. Measured: `softKeyboard1 [0, 0, 1248, 114]` — genuinely
+  narrow, so nothing outside that rect is blocked by construction.
+- Mode switches destroy + recreate the panel through a serialized
+  transition coordinator (generation tokens, stale-panel destroy,
+  coalescing, reconcile-after-complete). Verified round trip
+  collapsed -> expanded -> collapsed via `^` / chevron.
+- A recreated panel sometimes never receives vsync and renders nothing;
+  fixed with a generation-guarded hide/show nudge 700ms after each
+  transition.
+- Docking verified on MatePad Edge: Panel.moveTo(0, 1841) lands the
+  collapsed panel exactly between the app area and the taskbar
+  (`softKeyboard [0, 1841, 1248, 114]`, taskbar `[0, 1955, 3120, 125]`,
+  no overlap; strip content pixel-verified non-black). Caveat found:
+  moveTo on a VISIBLE panel blanks the surface, so the dock move is
+  performed before show(), with guarded same-coordinate retries after
+  show, after the vsync nudge, and whenever the reported inset changes.
+- Known limitation: injected (automation) touches do not reach buttons on
+  floating IME panels, so strip button interactivity at the docked
+  position still needs a real-finger confirmation.
+- Focus changes no longer recreate a matching panel (an earlier draft
+  rebuilt the panel on every `inputStart`, flashing the bar; fixed).
+
+Verified by automation on device: narrow/expanded rectangles, round trip,
+physical-key injection reaching the IME (`physKey code=2017 pinyin=true`),
+candidate chips rendering in the strip (pixel check), dock/app touches
+landing behind the strip (a dock tap opened the assistant; page clicks
+reached the browser behind). STILL REQUIRES the human finger test: outside-
+strip clicks, folio typing + chip tap commits Chinese, `^`/chevron round
+trip. Known limitation: the system pins the floating panel top-left and
+ignores all move requests; vertical placement is not possible.
+
+Deploy lessons (keep): always show `hdc file send` output — silent transfer
+failures made `bm install` deploy a stale hap (verify the
+`onCreate enter — build <stamp>` line). The hilog buffer churns in ~10s:
+stream `hilog` to a file instead of snapshotting. Heavy install churn can
+flip the IME to BASIC_MODE (recover: switch to Celia, force-stop ours,
+`ime -e` ours, `ime -s` ours). Panel windows are named `softKeyboard<N>`
+(N increments per re-creation; FLOATING ones are findable via
+`window.findWindow`, FIXED ones are not).

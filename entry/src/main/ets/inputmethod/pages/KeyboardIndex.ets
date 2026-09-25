@@ -31,18 +31,14 @@ const REPEAT_MS: number = 100;
 // Tune this so the candidate bar sits just above the dock with no overlap.
 const DOCK_FALLBACK_VP: number = 40;
 // Collapsed (physical-keyboard) candidate strip geometry. The IME panel is
-// grown to STRIP_VP + STRIP_BAND_VP: the strip renders in the TOP STRIP_VP of
+// The floating candidate panel is COLLAPSED_VP tall; STRIP_BAND_VP is only
+// a position input for Panel.moveTo (taskbar height), never window height.
+// Legacy note (kept for history): a previous experiment
 // the window and the band underneath stays transparent + touch-passing. The
 // band must clear the 2-in-1 taskbar completely (SCBSmartDock window is
 // 125 px tall at density 1.9 => 66 vp), otherwise the strip overlaps it.
 const STRIP_VP: number = 60; // must match COLLAPSED_VP in MixedController.ets
 const STRIP_BAND_VP: number = 66; // >= taskbar window height (125 px @ 1.9)
-
-/** Anchor for a strip drag: pointer position and strip offset at touch-down. */
-interface StripAnchor {
-  x: number;
-  offset: number;
-}
 
 @Entry
 @Component
@@ -69,8 +65,6 @@ struct KeyboardIndex {
   private kbWindow: window.Window | undefined;
   // horizontal offset (vp) of the candidate strip inside the transparent
   // band; -1 = not yet placed (defaults to right-aligned)
-  @State stripOffsetVp: number = -1;
-  private stripAnchor: StripAnchor | undefined;
   // collapsed-state latch for the one-shot dock-inset trigger
   private collapsedSeen: boolean = false;
   // geometry key under which the floating bar was last auto-positioned, so a
@@ -438,9 +432,6 @@ struct KeyboardIndex {
       })
   }
 
-  /** Grip that drags the candidate strip along the band. Window moves are
-   * system-blocked for IME panels (moveWindowTo ignored; startMoving hides
-   * the panel), so the strip itself moves inside the transparent band. */
   @Builder
   DragHandle() {
     Text('⠿')
@@ -453,53 +444,40 @@ struct KeyboardIndex {
       .height('90%')
       .margin({ left: 4, right: 4 })
       .onTouch((e: TouchEvent) => {
-        if (e.touches.length === 0) {
+        if (e.type !== TouchType.Down) {
           return;
         }
-        const pt: TouchObject = e.touches[0];
-        if (e.type === TouchType.Down) {
-          if (this.stripOffsetVp < 0) {
-            this.stripOffsetVp = this.maxStripOffsetVp();
-          }
-          this.stripAnchor = { x: pt.screenX, offset: this.stripOffsetVp };
-        } else if (e.type === TouchType.Move) {
-          const a = this.stripAnchor;
-          if (a) {
-            this.stripOffsetVp = Math.min(Math.max(0, a.offset + (pt.screenX - a.x)), this.maxStripOffsetVp());
-          }
-        } else if (e.type === TouchType.Up || e.type === TouchType.Cancel) {
-          this.stripAnchor = undefined;
+        const win = this.kbWindow;
+        if (win) {
+          win.startMoving().then(() => {
+            console.info('bar startMoving ok');
+          }).catch((err: BusinessError) => {
+            console.warn(`startMoving failed ${err.code}`);
+          });
+        } else {
+          this.refreshDockInset();
         }
       })
   }
 
-  private maxStripOffsetVp(): number {
-    const wVp: number = px2vp(display.getDefaultDisplaySync().width);
-    return Math.max(0, Math.floor(wVp * 0.6) - 8); // strip is 40% of the width
-  }
-
-  /** Candidate bar while a physical keyboard is attached: the strip only fills
-   * the TOP STRIP_VP of the panel window; the band below it is transparent and
-   * touch-passing so the 2-in-1 taskbar underneath stays visible and usable. */
+  /** Candidate bar while a physical keyboard is attached: fills the narrow
+   * FLG_FLOATING panel window, which the controller docks bottom-left above
+   * the taskbar via Panel.moveTo(). */
   @Builder
   CollapsedBar() {
     Row() {
-      this.DragHandle()
       this.Chips()
       if (this.physicalMode) {
         this.PinyinModeButton()
       }
       this.CollapseButton('^')
     }
-    .width('40%')
-    .height(STRIP_VP)
+    .width('100%')
+    .height('100%')
     .backgroundColor(BG_BAR)
     .borderRadius(16)
-    .border({ width: 1, color: '#C8CDD6' })
     .padding({ left: 12, right: 8 })
     .alignItems(VerticalAlign.Center)
-    .hitTestBehavior(HitTestMode.Default)
-    .offset({ x: this.stripOffsetVp < 0 ? this.maxStripOffsetVp() : this.stripOffsetVp })
   }
 
   @Builder
@@ -686,18 +664,14 @@ struct KeyboardIndex {
 
   build() {
     if (this.collapsed) {
-      // slim candidate strip drawn inside the pinned full-width band: the
-      // band surface stays transparent and does NOT consume touches outside
-      // the strip, so the system dock underneath stays usable; the grip
-      // slides the strip horizontally inside the band
+      // the narrow FLG_FLOATING window IS the candidate bar; the controller
+      // docks it bottom-left above the taskbar via Panel.moveTo()
       Column() {
         this.CollapsedBar()
-        Blank().height(this.bottomInset)
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(Color.Transparent)
-      .hitTestBehavior(HitTestMode.None)
+      .backgroundColor(BG_BAR)
       .alignItems(HorizontalAlign.Start)
       .onAreaChange((_oldValue: Area, newValue: Area) => {
         const w: number = Number(newValue.width);

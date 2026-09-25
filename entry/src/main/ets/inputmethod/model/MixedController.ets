@@ -16,6 +16,9 @@ export type UiListener =
     expanded: boolean, collapsed: boolean, physicalMode: boolean, pinyinOn: boolean, sel: number) => void;
 
 const TAG: string = 'MixedController';
+// taskbar/dock height assumed for floating-bar docking when the page has not
+// reported a measured inset yet (MatePad Edge taskbar = 125px @ density 1.9)
+const COLLAPSED_DOCK_INSET_VP: number = 66;
 // fixed chrome above/below the key rows: candidate bar + row gaps + padding
 // Jyutping sizing model (adopted 2026-09-24 from yuetyam/jyutping-harmony,
 // CC0 — user prefers their absolute sizes; our fold/rotate refresh engine
@@ -67,7 +70,7 @@ class MixedController {
   // build identifier logged in onCreate: hilog "build <stamp>" proves which
   // bundle the LIVE service actually runs (install -r does not always
   // restart a running input-method service)
-  static readonly STAMP: string = 'strip-above6 2026-09-25';
+  static readonly STAMP: string = 'floating-panel-docked4 2026-09-25';
   private context: InputMethodExtensionContext | undefined;
   private panel: inputMethodEngine.Panel | undefined;
   private kbController: inputMethodEngine.KeyboardController | undefined;
@@ -118,6 +121,12 @@ class MixedController {
   private panelShown: boolean = false;
   // true = letters feed the pinyin engine; false = EN mode, letters commit raw
   private physicalPinyin: boolean = true;
+  // panel mode state machine
+  private desiredPanelMode: 'fixed' | 'floating' = 'fixed';
+  // window semantics of the LIVE panel (set only after a successful create)
+  private panelFloating: boolean = false;
+  private panelGeneration: number = 0;
+  private transitionPromise: Promise<void> | undefined;
   // index (into candidates) highlighted via arrow keys; -1 = nothing picked
   private selCand: number = -1;
   // active "raw digit" prediction round: the digit already committed to the
@@ -326,8 +335,16 @@ class MixedController {
       this.scanPhysicalKeyboard().then((present: boolean) => {
         this.physicalKbActive = present;
         if (present) {
-          this.applyPanelSize();
+          // a physical keyboard is already attached at boot: the desired
+          // panel is the slim floating candidate bar
+          this.kbExpanded = false;
+          this.desiredPanelMode = 'floating';
+          console.info(`${TAG} boot scan: physical keyboard present -> floating`);
         }
+        // sizes may differ from the boot defaults; reconcile now (no-op
+        // without an input session — inputStart will schedule the transition)
+        this.applyPanelSize();
+        this.scheduleTransition();
       });
     }
     if (PHYSICAL_KEY_CAPTURE_ENABLED) {
@@ -351,6 +368,7 @@ class MixedController {
   }
 
   public onDestroy(): void {
+    ++this.panelGeneration;
     if (this.relayoutTimer !== -1) {
       clearTimeout(this.relayoutTimer);
       this.relayoutTimer = -1;
@@ -420,32 +438,60 @@ class MixedController {
   }
 
   /**
+   * Dock the floating candidate panel: bottom-left, immediately above the
+   * taskbar. Panel.moveTo is the documented move path for SOFT_KEYBOARD
+   * panels and is usable with FLG_FLOATING (only FLG_FIXED is excluded by
+   * the SDK docs). Generation- and panel-guarded so stale calls no-op.
+   *
+   * KEY RULE: moveTo() must only run while the panel is HIDDEN — moving a
+   * visible panel blanks its surface. Callers hide first (or dock before
+   * the first show) and re-show afterwards.
+   */
+  private dockFloatingPanelHidden(expectedPanel: inputMethodEngine.Panel,
+    expectedGeneration: number): Promise<void> {
+    if (expectedPanel !== this.panel || expectedGeneration !== this.panelGeneration) {
+      return Promise.resolve();
+    }
+    if (!this.panelFloating) {
+      return Promise.resolve();
+    }
+    const dis = display.getDefaultDisplaySync();
+    const insetPx = Math.round(this.bottomInset * this.densityPx);
+    // centred horizontally, docked above the taskbar vertically
+    const x = Math.max(0, Math.round((dis.width - this.panelWidthPx) / 2));
+    const y = Math.max(0, dis.height - insetPx - this.panelHeightPx);
+    try {
+      return expectedPanel.moveTo(x, y).then(() => {
+        console.info(`${TAG} dock moveTo(${x},${y}) panel ${this.panelWidthPx}x${this.panelHeightPx}px inset ${insetPx}px gen=${expectedGeneration} (hidden)`);
+      }).catch((err: BusinessError) => {
+        console.warn(`${TAG} dock moveTo rejected: ${err.code} ${err.message}`);
+      });
+    } catch (e) {
+      const err = e as BusinessError;
+      console.warn(`${TAG} dock moveTo threw: ${err.code} ${err.message}`);
+      return Promise.resolve();
+    }
+  }
+
+  /**
    * Effective window size: the full keyboard, or the slim COLLAPSED_VP
    * candidate bar while a physical keyboard is attached.
    */
   private applyPanelSize(): void {
-    // One system-pinned FLG_FIXED panel for both modes: the full keyboard
-    // fills it, and the physical-keyboard candidate bar is a slim strip drawn
-    // inside a transparent full-width window. The WM silently IGNORES
-    // moveWindowTo/startMoving on IME panels (verified on the 2-in-1: the
-    // call resolves but the window rect never changes), so the window itself
-    // is never moved; the strip slides inside it instead.
-    // collapsed = slim full-width band; the page draws the visible candidate
-    // strip inside it and (if the surface allows transparency) only the strip
-    // is visible. FLG_FIXED both modes: panel moves are system-blocked
-    // (moveWindowTo ignored, startMoving hides the panel), so the window
-    // never moves and never needs the floating flag.
-    this.panelWidthPx = this.fullWidthPx;
-    this.panelWidth = this.fullWidthPx / this.densityPx;
-    // collapsed: strip height + the taskbar/dock inset, so the visible strip
-    // sits ABOVE the taskbar and only a transparent, touch-passing zone
-    // covers the taskbar itself
-    this.panelHeight = this.isCollapsed()
-      ? COLLAPSED_VP + this.bottomInset
-      : this.basePanelHeight + this.bottomInset;
-    this.panelHeightPx = Math.round(this.panelHeight * this.densityPx);
+    if (this.desiredPanelMode === 'floating') {
+      this.panelWidthPx = Math.round(this.fullWidthPx * 0.4);
+      this.panelWidth = this.panelWidthPx / this.densityPx;
+      this.panelHeight = COLLAPSED_VP; // no bottomInset in floating mode
+      this.panelHeightPx = Math.round(this.panelHeight * this.densityPx);
+    } else {
+      this.panelWidthPx = this.fullWidthPx;
+      this.panelWidth = this.panelWidthPx / this.densityPx;
+      this.panelHeight = this.basePanelHeight + this.bottomInset;
+      this.panelHeightPx = Math.round(this.panelHeight * this.densityPx);
+    }
     if (this.panel && this.panelShown) {
-      this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1);
+      this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1,
+        this.panel, this.panelGeneration);
     }
     this.notifyUi();
   }
@@ -453,8 +499,10 @@ class MixedController {
   /** ^ / ⌄ tapped on the panel: switch between candidate bar and full keys. */
   public onToggleCollapse(): void {
     this.kbExpanded = !this.kbExpanded;
-    console.info(`${TAG} collapse toggle -> expanded=${this.kbExpanded}`);
-    this.applyLayout();
+    this.desiredPanelMode = this.kbExpanded ? 'fixed'
+      : (this.physicalKbActive ? 'floating' : 'fixed');
+    console.info(`${TAG} collapse toggle -> expanded=${this.kbExpanded} desired=${this.desiredPanelMode}`);
+    this.scheduleTransition();
   }
 
   /**
@@ -470,6 +518,18 @@ class MixedController {
     }
     console.info(`${TAG} bottomInset ${this.bottomInset} -> ${next} vp`);
     this.bottomInset = next;
+    if (this.panelFloating && this.panel) {
+      // reposition strictly per the key rule: hidden during moveTo
+      const kb = this.panel;
+      const gen = this.panelGeneration;
+      const reposition = this.panelShown
+        ? kb.hide().then(() => this.dockFloatingPanelHidden(kb, gen))
+          .then(() => kb.show())
+        : this.dockFloatingPanelHidden(kb, gen);
+      reposition.catch((err: BusinessError) => {
+        console.warn(`${TAG} inset reposition failed: ${err.code} ${err.message}`);
+      });
+    }
     this.calibAttempts = 0;
     this.applyLayout();
   }
@@ -543,7 +603,9 @@ class MixedController {
       this.calibAttempts++;
       const corrected: number = Math.round(this.panelHeightPx * (this.panelHeight / heightVp));
       console.info(`${TAG} calibrating resize: ${this.panelHeightPx} -> ${corrected}`);
-      this.resizeWithRetry(this.panelWidthPx, corrected, 1);
+      if (this.panel) {
+        this.resizeWithRetry(this.panelWidthPx, corrected, 1, this.panel, this.panelGeneration);
+      }
     }
   }
 
@@ -552,8 +614,10 @@ class MixedController {
       console.error(`${TAG} initWindow: no context`);
       return;
     }
+    // No panel is created here: with no editor focused there is nothing to
+    // show, and the desired fixed/floating panel is created (or reconciled)
+    // at the next inputStart via scheduleTransition().
     this.applyLayout();
-    this.setupPanel();
   }
 
   /**
@@ -563,90 +627,202 @@ class MixedController {
    * screen width works) but pins it top-left and ignores moveWindowTo, so
    * the page re-creates nothing; the bar's x-position is instead chosen by
    * re-creating the panel is NOT needed — the page now offsets the CONTENT
-   * inside the transparent full-height strip... (simplified: bar drawn
-   * top-right by the page inside the floating window).
-   */
-  private setupPanel(): void {
-    if (!this.context) {
+  /** Serialized transition: destroy existing panel, create new panel with
+   * the correct flag, configure (setUiContent -> resize -> show), and guard
+   * against stale panels via generation tokens. */
+  private scheduleTransition(): void {
+    if (!this.context || !this.inputClient) {
+      // No active session — reconcile at next inputStart
       return;
     }
-    const panelInfo: inputMethodEngine.PanelInfo = {
-      type: inputMethodEngine.PanelType.SOFT_KEYBOARD,
-      flag: inputMethodEngine.PanelFlag.FLG_FIXED
-    };
-    inputMethodEngine.getInputMethodAbility().createPanel(this.context, panelInfo)
-      .then((panel: inputMethodEngine.Panel) => {
-        console.info(`${TAG} createPanel ok`);
-        this.panel = panel;
-        console.info(`${TAG} setUiContent start`);
-        return panel.setUiContent('inputmethod/pages/KeyboardIndex').then(() => {
-          console.info(`${TAG} setUiContent ok`);
+    if (this.panel
+      && (this.desiredPanelMode === 'floating') === this.panelFloating) {
+      // live panel already has the desired semantics: never recreate it just
+      // because focus changed (each recreate visibly flashes the bar).
+      // Only make sure it is actually shown for this session.
+      if (!this.panelShown) {
+        this.panel.show().catch((err: BusinessError) => {
+          console.warn(`${TAG} panel re-show on focus: ${err.code}`);
         });
-      })
-      .then(() => {
-        if (this.panel) {
-          const kb: inputMethodEngine.Panel = this.panel;
-          // the panel window only becomes resizable once it exists; the system
-          // may also consider a freshly created panel "already shown", so hide
-          // it first, size it, and let the system show it on demand
-          kb.on('show', () => {
-            console.info(`${TAG} panel show event`);
-            this.panelShown = true;
-            this.calibAttempts = 0;
-            // re-derive from live metrics: rotation/fold may have happened
-            // while the panel was hidden and no area report will correct us
-            this.applyLayout();
-          });
-          kb.on('hide', () => {
-            console.info(`${TAG} panel hide event`);
-            this.panelShown = false;
-            if (PHYSICAL_KB_PIN_ENABLED && this.physicalKbActive && this.inputClient) {
-              // editor still focused while a shared keyboard is attached: the
-              // user may have no pointer to bring the keyboard back — do it
-              setTimeout(() => {
-                this.ensureShown();
-              }, 600);
-            }
-          });
-          console.info(`${TAG} panel initial hide`);
-          return kb.hide().then(() => {
-            console.info(`${TAG} panel hidden, resizing`);
-            return this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1);
-          }).then(() => {
-            if (this.inputClient) {
-              // mid-session panel re-creation: bring the keyboard back
-              kb.show().catch((err: BusinessError) => {
-                console.error(`${TAG} re-show failed: ${err.code}`);
-              });
-            }
-          }).catch((err: BusinessError) => {
-            console.error(`${TAG} panel hide failed: code ${err.code}`);
-            return this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1);
-          });
+      }
+      return;
+    }
+    if (!this.transitionPromise) {
+      this.transitionPromise = this.executeTransition().finally(() => {
+        this.transitionPromise = undefined;
+        // reconcile: if the desired mode changed while this transition ran,
+        // run one follow-up (loop terminates because each run applies the
+        // then-current desired mode)
+        if (this.inputClient
+          && (this.desiredPanelMode === 'floating') !== this.panelFloating) {
+          this.scheduleTransition();
         }
-        return Promise.resolve();
-      })
-      .catch((err: BusinessError) => {
-        console.error(`${TAG} setupPanel failed: code ${err.code} msg ${err.message}`);
       });
+    }
   }
 
-  /**
-   * resize() can hit a 12800008 IMS race right after createPanel; retry a few times.
-   */
-  private resizeWithRetry(width: number, height: number, attempt: number): Promise<void> {
-    if (!this.panel) {
+  private async executeTransition(): Promise<void> {
+    const gen = ++this.panelGeneration;
+    const mode = this.desiredPanelMode;
+
+    // 1. Destroy existing panel
+    if (this.panel) {
+      try {
+        await inputMethodEngine.getInputMethodAbility().destroyPanel(this.panel);
+      } catch (e) {
+        console.warn(`${TAG} destroyPanel: ${(e as BusinessError).code}`);
+      }
+      this.panel = undefined;
+    }
+
+    // 2. Stale guard
+    if (gen !== this.panelGeneration) {
+      return;
+    }
+
+    // 3. Create new panel
+    const flag = mode === 'floating'
+      ? inputMethodEngine.PanelFlag.FLG_FLOATING
+      : inputMethodEngine.PanelFlag.FLG_FIXED;
+    let newPanel: inputMethodEngine.Panel | undefined;
+    try {
+      const info: inputMethodEngine.PanelInfo = {
+        type: inputMethodEngine.PanelType.SOFT_KEYBOARD,
+        flag,
+      };
+      newPanel = await inputMethodEngine.getInputMethodAbility()
+        .createPanel(this.context!, info);
+
+      // 3a. Stale guard — a newer transition superseded this one
+      if (gen !== this.panelGeneration) {
+        await inputMethodEngine.getInputMethodAbility().destroyPanel(newPanel);
+        return;
+      }
+      this.panel = newPanel;
+
+      // 4. setUiContent before resize (per device findings)
+      await this.panel.setUiContent('inputmethod/pages/KeyboardIndex');
+
+      // 5. Compute and apply size
+      if (mode === 'floating') {
+        const density = display.getDefaultDisplaySync().densityPixels;
+        const w = Math.round(display.getDefaultDisplaySync().width * 0.4);
+        const h = Math.round(COLLAPSED_VP * density);
+        await this.resizeWithRetry(w, h, 1, this.panel, gen);
+        this.panelWidthPx = w;
+        this.panelHeightPx = h;
+        this.panelWidth = w / density;
+        this.panelHeight = COLLAPSED_VP;
+        // assume the taskbar inset up-front (the page refines it via
+        // setBottomInset() afterwards), then KEY RULE: dock while HIDDEN
+        if (this.bottomInset < 1) {
+          this.bottomInset = COLLAPSED_DOCK_INSET_VP;
+        }
+        await this.dockFloatingPanelHidden(this.panel, gen);
+      } else {
+        const dis = display.getDefaultDisplaySync();
+        const applyW = dis.width;
+        const applyH = Math.round((this.basePanelHeight + this.bottomInset) * this.densityPx);
+        await this.resizeWithRetry(applyW, applyH, 1, this.panel, gen);
+        this.panelWidthPx = applyW;
+        this.panelHeightPx = applyH;
+        this.panelWidth = applyW / this.densityPx;
+        this.panelHeight = this.basePanelHeight + this.bottomInset;
+      }
+
+      // 6. Register callbacks
+      this.panelFloating = mode === 'floating';
+      this.registerPanelCallbacks(this.panel, gen);
+
+      // 7. Show if input still active
+      if (this.inputClient) {
+        await this.panel.show();
+      }
+      // (the dock already happened while hidden, before the callbacks above;
+      // no further moveTo occurs while the panel is visible)
+      // 8. Vsync nudge: a freshly recreated panel sometimes never receives
+      // vsync and the page draws nothing (observed as an empty/transparent
+      // keyboard). A delayed hide/show forces a re-composite. Generation and
+      // panel guards keep the nudge off stale instances.
+      const kbPanel = this.panel;
+      setTimeout(() => {
+        if (gen !== this.panelGeneration || kbPanel !== this.panel || !this.panelShown) {
+          return;
+        }
+        kbPanel.hide().then(() => {
+          // KEY RULE: re-dock while hidden, then re-show — this also restores
+          // the docked position in case hide/show reset it
+          const re = mode === 'floating'
+            ? this.dockFloatingPanelHidden(kbPanel, gen)
+            : Promise.resolve();
+          return re.then(() => kbPanel.show());
+        }).then(() => {
+          console.info(`${TAG} vsync nudge applied (gen=${gen})`);
+        }).catch((err: BusinessError) => {
+          console.warn(`${TAG} vsync nudge failed: ${err.code}`);
+        });
+      }, 700);
+      console.info(`${TAG} ${mode} panel transition complete (gen=${gen})`);
+    } catch (err) {
+      console.error(`${TAG} ${mode} panel failed: ${(err as BusinessError).code} ${(err as BusinessError).message}`);
+      // Destroy any partially-created floating panel
+      if (newPanel) {
+        try { await inputMethodEngine.getInputMethodAbility().destroyPanel(newPanel); }
+        catch (_) { /* ignore */ }
+        if (gen === this.panelGeneration) {
+          this.panel = undefined;
+        }
+      }
+      if (mode === 'floating') {
+        // Fallback: switch to fixed
+        this.kbExpanded = true;
+        this.desiredPanelMode = 'fixed';
+        console.info(`${TAG} floating fallback — retrying as fixed`);
+        await this.executeTransition();
+      }
+      // If fixed also fails, we are in a no-panel state
+    }
+  }
+
+  private registerPanelCallbacks(p: inputMethodEngine.Panel, gen: number): void {
+    p.on('show', () => {
+      if (gen === this.panelGeneration && p === this.panel) {
+        this.panelShown = true;
+        this.calibAttempts = 0;
+        this.applyLayout();
+      }
+    });
+    p.on('hide', () => {
+      if (gen === this.panelGeneration && p === this.panel) {
+        this.panelShown = false;
+        if (PHYSICAL_KB_PIN_ENABLED && this.physicalKbActive && this.inputClient) {
+          setTimeout(() => { this.ensureShown(); }, 600);
+        }
+      }
+    });
+  }
+
+  /** Retry resize with generation-guarded stale detection. */
+  private resizeWithRetry(
+    width: number, height: number, attempt: number,
+    expectedPanel: inputMethodEngine.Panel, expectedGen: number,
+  ): Promise<void> {
+    if (!expectedPanel) {
       return Promise.resolve();
     }
-    return this.panel.resize(width, height).then(() => {
+    return expectedPanel.resize(width, height).then(() => {
       this.resizeGiveups = 0;
       console.info(`${TAG} resize ok (attempt ${attempt})`);
     }).catch((err: BusinessError) => {
       console.error(`${TAG} resize attempt ${attempt} failed: code ${err.code}`);
+      if (expectedGen !== this.panelGeneration || expectedPanel !== this.panel) {
+        console.info(`${TAG} resize retry abandoned: panel/generation superseded`);
+        return Promise.resolve();
+      }
       if (attempt < 6) {
         return new Promise<void>((resolve: (v: void) => void) => {
           setTimeout(resolve, 300);
-        }).then(() => this.resizeWithRetry(width, height, attempt + 1));
+        }).then(() => this.resizeWithRetry(width, height, attempt + 1, expectedPanel, expectedGen));
       }
       console.error(`${TAG} resize giving up`);
       this.recoverFromResizeFailure();
@@ -682,6 +858,9 @@ class MixedController {
       this.kbController = kbController;
       this.inputClient = inputClient;
       this.resetComposition();
+      // Reconcile desired panel mode: if a preference was saved while no editor
+      // was focused, create/recreate the correct panel now
+      this.scheduleTransition();
       // cheap safety net: geometry changes that happened while no editor was
       // focused (and possibly while the panel was hidden) get picked up here
       this.scheduleRelayout();
@@ -689,6 +868,19 @@ class MixedController {
     ability.on('inputStop', () => {
       console.info(`${TAG} inputStop`);
       this.resetComposition();
+      // Preserve desiredPanelMode — the user's choice survives across
+      // editor focus changes. Destroy the panel (generation bump prevents
+      // stale callbacks from showing it again).
+      ++this.panelGeneration;
+      this.inputClient = undefined;
+      if (this.panel) {
+        inputMethodEngine.getInputMethodAbility().destroyPanel(this.panel)
+          .catch((err: BusinessError) => {
+            console.warn(`${TAG} inputStop destroyPanel: ${err.code}`);
+          });
+        this.panel = undefined;
+      }
+      this.panelShown = false;
     });
     // any display geometry change funnels into ONE debounced relayout;
     // 'change' alone misses fold transitions and rotations on some builds
@@ -754,15 +946,27 @@ class MixedController {
         return;
       }
       if (d.type === 'add') {
-        this.physicalKbActive = true;
-        this.kbExpanded = false;
-        console.info(`${TAG} physical keyboard attached: collapsing to candidate bar`);
-        this.applyLayout();
+        if (!this.physicalKbActive) {
+          this.physicalKbActive = true;
+          this.kbExpanded = false;
+          this.desiredPanelMode = 'floating';
+          console.info(`${TAG} physical keyboard attached: collapsing to candidate bar`);
+          if (this.inputClient) {
+            this.scheduleTransition();
+          }
+        }
       } else {
         this.scanPhysicalKeyboard().then((still: boolean) => {
-          this.physicalKbActive = still;
-          this.kbExpanded = false;
-          this.applyLayout();
+          if (this.physicalKbActive && !still) {
+            this.physicalKbActive = false;
+            this.kbExpanded = false;
+            // detach: the full keyboard is the normal state again
+            this.desiredPanelMode = 'fixed';
+            console.info(`${TAG} physical keyboard detached: restoring full keyboard`);
+            if (this.inputClient) {
+              this.scheduleTransition();
+            }
+          }
         });
       }
     });
