@@ -383,9 +383,33 @@ struct KeyboardIndex {
       })
   }
 
+  /** Celia-style minimise chevron at the LEFT of the candidate bar: hides
+   * the panel until the next input focus. Only on soft-keyboard-only
+   * devices — with a physical keyboard the bar/collapse pair is used. */
+  @Builder
+  MinimizeButton() {
+    Text('⌄')
+      .fontSize(18)
+      .fontColor(FG_TEXT)
+      .textAlign(TextAlign.Center)
+      .backgroundColor(this.keyBg(BG_FUNC, 'minimise'))
+      .borderRadius(6)
+      .width(44)
+      .height(36)
+      .margin({ right: 4 })
+      .onTouch((e: TouchEvent) => {
+        if (e.type === TouchType.Down) {
+          mixedController.minimizePanel();
+        }
+      })
+  }
+
   @Builder
   CandidateBar() {
     Row() {
+      if (!this.physicalMode) {
+        this.MinimizeButton()
+      }
       this.Chips()
       if (this.physicalMode) {
         this.CollapseButton('⌄')
@@ -407,8 +431,8 @@ struct KeyboardIndex {
       .backgroundColor(this.keyBg(BG_FUNC, 'pinyin_row'))
       .borderRadius(8)
       .layoutWeight(this.expandedScreen ? 1 : 1.5)
-      .height(this.rowHeight)
-      .margin(1)
+      .height(this.rowHeight - 12)
+      .margin({ left: 3, right: 3, top: 6, bottom: 6 })
       .onTouch((e: TouchEvent) => {
         this.startPress('pinyin_row', e, () => {
           mixedController.onTogglePhysicalPinyin();
@@ -492,8 +516,8 @@ struct KeyboardIndex {
       .backgroundColor(this.keyBg(BG_KEY, `${this.rowTag()}_${ch}`))
       .borderRadius(8)
       .layoutWeight(1)
-      .height(this.rowHeight)
-      .margin(1)
+      .height(this.rowHeight - 12)
+      .margin({ left: 3, right: 3, top: 6, bottom: 6 })
       .onTouch((e: TouchEvent) => {
         this.startPress(`${this.rowTag()}_${ch}`, e, () => {
           if (num) {
@@ -514,8 +538,8 @@ struct KeyboardIndex {
       .backgroundColor(this.keyBg(this.numericMode ? BG_FUNC_ON : (this.shiftOn ? BG_FUNC_ON : BG_FUNC), 'shift'))
       .borderRadius(8)
       .layoutWeight(this.expandedScreen ? 1.35 : 1.2)
-      .height(this.rowHeight)
-      .margin(1)
+      .height(this.rowHeight - 12)
+      .margin({ left: 3, right: 3, top: 6, bottom: 6 })
       .onTouch((e: TouchEvent) => {
         this.startPress('shift', e, () => {
           if (this.numericMode) {
@@ -536,8 +560,8 @@ struct KeyboardIndex {
       .backgroundColor(this.keyBg(BG_FUNC, 'back'))
       .borderRadius(8)
       .layoutWeight(this.expandedScreen ? 1.55 : 1.2)
-      .height(this.rowHeight)
-      .margin(1)
+      .height(this.rowHeight - 12)
+      .margin({ left: 3, right: 3, top: 6, bottom: 6 })
       .onTouch((e: TouchEvent) => {
         this.startPress('back', e, () => {
           mixedController.onBackspace();
@@ -554,8 +578,8 @@ struct KeyboardIndex {
       .backgroundColor(this.keyBg(BG_FUNC, 'mode'))
       .borderRadius(8)
       .layoutWeight(this.expandedScreen ? 1 : 1.5)
-      .height(this.rowHeight)
-      .margin(1)
+      .height(this.rowHeight - 12)
+      .margin({ left: 3, right: 3, top: 6, bottom: 6 })
       .onTouch((e: TouchEvent) => {
         this.startPress('mode', e, () => {
           this.numericMode = !this.numericMode;
@@ -573,8 +597,8 @@ struct KeyboardIndex {
       .backgroundColor(this.keyBg(BG_KEY, 'space'))
       .borderRadius(8)
       .layoutWeight(this.expandedScreen ? 6 : 5)
-      .height(this.rowHeight)
-      .margin(1)
+      .height(this.rowHeight - 12)
+      .margin({ left: 3, right: 3, top: 6, bottom: 6 })
       .onTouch((e: TouchEvent) => {
         // no repeat: a held Space should stay one space
         this.startPress('space', e, () => {
@@ -592,8 +616,8 @@ struct KeyboardIndex {
       .backgroundColor(this.keyBg(BG_FUNC, 'enter'))
       .borderRadius(8)
       .layoutWeight(this.expandedScreen ? 1 : 1.5)
-      .height(this.rowHeight)
-      .margin(1)
+      .height(this.rowHeight - 12)
+      .margin({ left: 3, right: 3, top: 6, bottom: 6 })
       .onTouch((e: TouchEvent) => {
         this.startPress('enter', e, () => {
           // Shift+Enter forces a literal line break; plain Enter fires the
@@ -626,8 +650,8 @@ struct KeyboardIndex {
       .backgroundColor(this.keyBg(BG_KEY, `p_${ch}`))
       .borderRadius(8)
       .layoutWeight(1)
-      .height(this.rowHeight)
-      .margin(1)
+      .height(this.rowHeight - 12)
+      .margin({ left: 3, right: 3, top: 6, bottom: 6 })
       .onTouch((e: TouchEvent) => {
         this.startPress(`p_${ch}`, e, () => {
           mixedController.onPunctuation(ch);
@@ -637,13 +661,13 @@ struct KeyboardIndex {
 
   @Builder
   LetterRows() {
-    Column({ space: this.expandedScreen ? 10 : 2 }) {
-      Row({ space: this.expandedScreen ? 10 : 2 }) {
+    Column() {
+      Row() {
         ForEach(this.row1(), (ch: string, index: number) => {
           this.LetterKey(ch, this.numericMode)
         }, (ch: string, index: number) => `${this.rowTag()}_${index}_${ch}`)
       }
-      Row({ space: this.expandedScreen ? 10 : 2 }) {
+      Row() {
         if (!this.expandedScreen) {
           Blank().layoutWeight(0.5)
         }
@@ -655,7 +679,7 @@ struct KeyboardIndex {
         }
       }
       .padding(this.expandedScreen ? { left: 70, right: 70 } : { left: 0, right: 0 })
-      Row({ space: this.expandedScreen ? 10 : 2 }) {
+      Row() {
         this.ShiftKey()
         ForEach(this.row3(), (ch: string, index: number) => {
           this.LetterKey(ch, this.numericMode)
@@ -688,9 +712,9 @@ struct KeyboardIndex {
       Column() {
         Column() {
           this.CandidateBar()
-          Column({ space: 1 }) {
+          Column() {
             this.LetterRows()
-            Row({ space: 1 }) {
+            Row() {
               // Celia bottom row order (measured on-device): 符号 | 英/中 | , | space | . | 123 | Enter
               this.ModeKey()
               this.PinyinKey()

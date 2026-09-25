@@ -496,6 +496,22 @@ class MixedController {
     this.notifyUi();
   }
 
+  /**
+   * Minimise button (soft-keyboard-only devices): hide the panel. It comes
+   * back on the next input focus — the scheduleTransition() skip branch
+   * re-shows a matching hidden panel when a new session starts.
+   */
+  public minimizePanel(): void {
+    const kb = this.panel;
+    if (!kb) {
+      return;
+    }
+    console.info(`${TAG} minimise tapped: hiding panel`);
+    kb.hide().catch((err: BusinessError) => {
+      console.error(`${TAG} minimise hide failed: ${err.code} ${err.message}`);
+    });
+  }
+
   /** ^ / ⌄ tapped on the panel: switch between candidate bar and full keys. */
   public onToggleCollapse(): void {
     this.kbExpanded = !this.kbExpanded;
