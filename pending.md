@@ -122,6 +122,16 @@ architecture (commit pending manual finger test):
   moveTo on a VISIBLE panel blanks the surface, so the dock move is
   performed before show(), with guarded same-coordinate retries after
   show, after the vsync nudge, and whenever the reported inset changes.
+- Placement finalised: the docked panel is horizontally CENTRED
+  (`[936, 1841, 1248, 114]` on Edge), verified through an expand/collapse
+  round trip.
+- Bottom-inset fix: the expanded keyboard's dock spacer is now applied
+  only when the avoid-area query MEASURES a real dock (>= 50vp). The old
+  unconditional 40vp fallback added a phantom ~115px blank band on the
+  Mate XTs (gap below keys: ours 264px vs Jyutping 202px vs Celia 120px);
+  the XTs window now matches Jyutping (`[0, 1309, 1008, 794]`, gap ~142px)
+  while the Edge keeps its measured taskbar inset (expanded
+  `[0, 1407, 3120, 673]`).
 - Known limitation: injected (automation) touches do not reach buttons on
   floating IME panels, so strip button interactivity at the docked
   position still needs a real-finger confirmation.

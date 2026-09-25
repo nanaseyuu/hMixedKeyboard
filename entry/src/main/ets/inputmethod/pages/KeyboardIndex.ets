@@ -174,20 +174,23 @@ struct KeyboardIndex {
       return;
     }
     this.acquireBarWindow().then((win: window.Window | undefined) => {
+      // Only a MEASURED dock justifies the bottom spacer: a fallback here
+      // added a phantom blank band on devices without a taskbar (Mate XTs),
+      // while real docks (Edge taskbar, 125px) measure well above it.
       if (!win) {
-        console.warn('dock: no bar window found');
+        console.warn('dock: no bar window found; no bottom inset');
+        if (this.bottomInset !== 0) {
+          this.bottomInset = 0;
+          mixedController.setBottomInset(0);
+        }
         return;
       }
       this.kbWindow = win;
-      const dis = display.getDefaultDisplaySync();
       const dockPx: number = this.readDockPx(win);
-      {
-
-        const insetVp: number = px2vp(dockPx) > DOCK_FALLBACK_VP ? px2vp(dockPx) : DOCK_FALLBACK_VP;
-        if (Math.abs(insetVp - this.bottomInset) >= 1) {
-          this.bottomInset = insetVp;
-          mixedController.setBottomInset(insetVp);
-        }
+      const insetVp: number = px2vp(dockPx) >= 50 ? Math.round(px2vp(dockPx)) : 0;
+      if (Math.abs(insetVp - this.bottomInset) >= 1) {
+        this.bottomInset = insetVp;
+        mixedController.setBottomInset(insetVp);
       }
     });
   }

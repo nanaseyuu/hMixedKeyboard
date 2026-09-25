@@ -70,7 +70,7 @@ class MixedController {
   // build identifier logged in onCreate: hilog "build <stamp>" proves which
   // bundle the LIVE service actually runs (install -r does not always
   // restart a running input-method service)
-  static readonly STAMP: string = 'floating-panel-docked4 2026-09-25';
+  static readonly STAMP: string = 'floating-panel-docked5 2026-09-25';
   private context: InputMethodExtensionContext | undefined;
   private panel: inputMethodEngine.Panel | undefined;
   private kbController: inputMethodEngine.KeyboardController | undefined;
