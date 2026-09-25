@@ -155,3 +155,12 @@ flip the IME to BASIC_MODE (recover: switch to Celia, force-stop ours,
 `ime -e` ours, `ime -s` ours). Panel windows are named `softKeyboard<N>`
 (N increments per re-creation; FLOATING ones are findable via
 `window.findWindow`, FIXED ones are not).
+
+## 9. AppGallery submission  — in progress
+Checklist + privacy policy draft live in docs/AGC_SUBMISSION.md and
+docs/PRIVACY_POLICY.md. Blockers on the user side: Huawei developer
+account (real-name verified), release certificate + release profile in
+AGC, build the release-signed .app, host the privacy policy, fill the
+data-safety form (voice typing = online speech - declare it or ship v1
+without voice). App-side hygiene done: vendor fixed, deviceTypes trimmed
+to phone/tablet/2in1, release build probes green.

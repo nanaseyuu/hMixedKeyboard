@@ -1,7 +1,7 @@
 {
   "app": {
     "bundleName": "com.greennno.hmixedkeyboard",
-    "vendor": "example",
+    "vendor": "greennno",
     "versionCode": 1000000,
     "versionName": "1.0.0",
     "icon": "$media:layered_image",
