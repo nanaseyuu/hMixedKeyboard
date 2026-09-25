@@ -6,11 +6,6 @@ import { KeyEvent as PhysKeyEvent } from '@ohos.multimodalInput.keyEvent';
 import { Cand, dictEngine, LookupResult } from './DictEngine';
 
 /** Screen position (px) for the floating bar window. */
-export interface BarRect {
-  left: number;
-  top: number;
-}
-
 export type UiListener =
   (composition: string, candidates: Cand[], predicting: boolean, shift: boolean, rowHeight: number,
     expanded: boolean, collapsed: boolean, physicalMode: boolean, pinyinOn: boolean, sel: number) => void;
@@ -80,6 +75,9 @@ class MixedController {
   private panelHeight: number = 0;
   private panelWidthPx: number = 0;
   private panelHeightPx: number = 0;
+  // last size actually pushed to the panel: skips redundant resize RPCs
+  private appliedWidthPx: number = 0;
+  private appliedHeightPx: number = 0;
   // full-screen panel width (px) for the expanded keyboard
   private fullWidthPx: number = 0;
   private densityPx: number = 1;
@@ -89,7 +87,6 @@ class MixedController {
   // instead of covering it. 0 on devices whose panel already avoids it.
   private bottomInset: number = 0;
   private rowHeight: number = 46;
-  private measuredHeight: number = 0;
   private calibAttempts: number = 0;
   // panel width in vp as actually rendered, reported by the page. The display
   // object's width/height do not reliably swap on rotation on every build, so
@@ -488,8 +485,16 @@ class MixedController {
       this.panelWidth = this.panelWidthPx / this.densityPx;
       this.panelHeight = this.basePanelHeight + this.bottomInset;
       this.panelHeightPx = Math.round(this.panelHeight * this.densityPx);
+      // taskbar-inset devices (2-in-1): stretch the key rows so the
+      // keyboard FILLS the window down over the taskbar zone instead of
+      // leaving a blank band; 40vp above the rows = candidate bar + spacing
+      if (this.bottomInset > 0) {
+        this.rowHeight = Math.max(40, Math.floor((this.panelHeight - 40) / 4));
+      }
     }
-    if (this.panel && this.panelShown) {
+    const changed: boolean = this.panelWidthPx !== this.appliedWidthPx
+      || this.panelHeightPx !== this.appliedHeightPx;
+    if (this.panel && this.panelShown && changed) {
       this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1,
         this.panel, this.panelGeneration);
     }
@@ -575,7 +580,6 @@ class MixedController {
       }
       return;
     }
-    this.measuredHeight = heightVp;
     // fit rows to the window the system ACTUALLY granted, on every device
     // class: when a fold/rotate race or a system clamp leaves the window
     // smaller (or larger) than requested, the content adapts instead of
@@ -828,6 +832,8 @@ class MixedController {
     }
     return expectedPanel.resize(width, height).then(() => {
       this.resizeGiveups = 0;
+      this.appliedWidthPx = width;
+      this.appliedHeightPx = height;
       console.info(`${TAG} resize ok (attempt ${attempt})`);
     }).catch((err: BusinessError) => {
       console.error(`${TAG} resize attempt ${attempt} failed: code ${err.code}`);
@@ -1024,11 +1030,21 @@ class MixedController {
     }
   }
 
+  // signature of the last state pushed to the page: ArkUI re-renders the
+  // whole panel on every push, so skip when nothing user-visible changed
+  private lastPushSig: string = '';
+
   private notifyUi(): void {
-    if (this.uiListener) {
-      this.uiListener(this.composition, this.candidates, this.predicting, this.shiftOn, this.rowHeight,
-        this.expandedScreen, this.isCollapsed(), this.physicalKbActive, this.physicalPinyin, this.selCand);
+    if (!this.uiListener) {
+      return;
     }
+    const sig = `${this.composition}|${this.predicting}|${this.shiftOn}|${this.rowHeight}|${this.expandedScreen}|${this.isCollapsed()}|${this.physicalKbActive}|${this.physicalPinyin}|${this.selCand}|${this.candidates.length}|${this.candidates.length > 0 ? this.candidates[0].text : ''}`;
+    if (sig === this.lastPushSig) {
+      return;
+    }
+    this.lastPushSig = sig;
+    this.uiListener(this.composition, this.candidates, this.predicting, this.shiftOn, this.rowHeight,
+      this.expandedScreen, this.isCollapsed(), this.physicalKbActive, this.physicalPinyin, this.selCand);
   }
 
   private resetComposition(): void {

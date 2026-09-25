@@ -1,4 +1,5 @@
 import { Cand } from '../model/DictEngine';
+import vibrator from '@ohos.vibrator';
 import { mixedController } from '../model/MixedController';
 import { window, display } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -61,16 +62,12 @@ struct KeyboardIndex {
   private repeatTimer: number = -1;
   private repeating: string = '';
   private chipScroller: Scroller = new Scroller();
-  // handle to the floating panel window, cached for moveWindowTo / startMoving
+  // handle to the floating panel window, used for the dock avoid-area query
   private kbWindow: window.Window | undefined;
   // horizontal offset (vp) of the candidate strip inside the transparent
   // band; -1 = not yet placed (defaults to right-aligned)
   // collapsed-state latch for the one-shot dock-inset trigger
   private collapsedSeen: boolean = false;
-  // geometry key under which the floating bar was last auto-positioned, so a
-  // user drag is not snapped back on every area-change callback
-  private lastPlacedKey: string = '';
-
   aboutToAppear(): void {
     this.expandedScreen = mixedController.isExpandedScreen();
     mixedController.setUiListener((comp: string, cands: Cand[], predicting: boolean,
@@ -111,7 +108,7 @@ struct KeyboardIndex {
   /**
    * On 2-in-1 with a physical keyboard attached the candidate bar is a slim
    * floating freeform window: cache its handle, park it just above the desktop
-   * dock, and expose a drag handle (startMoving) so the user can place it
+   * dock (the dock position is chosen by the controller via Panel.moveTo).
    * anywhere. The full keyboard (rare here) still uses the avoid-area inset.
    */
   private setupDockAwareness(): void {
@@ -208,6 +205,23 @@ struct KeyboardIndex {
     mixedController.setUiListener(undefined);
   }
 
+  /** Short touch haptic on key press (virtual keys only). */
+  private vibrate(): void {
+    try {
+      vibrator.startVibration(
+        { type: 'time', duration: 20 },
+        { usage: 'touch' },
+        (err: BusinessError) => {
+          if (err && err.code !== 0) {
+            console.warn(`vibrate failed ${err.code}`);
+          }
+        }
+      );
+    } catch (e) {
+      console.warn(`vibrate threw ${(e as BusinessError).code}`);
+    }
+  }
+
   /** Press feedback + action on touch-down, and hold-to-repeat after 1 s. */
   private startPress(id: string, e: TouchEvent, action: () => void, repeat: boolean): void {
     if (e.type === TouchType.Down) {
@@ -216,6 +230,7 @@ struct KeyboardIndex {
       }
       this.cancelRepeat();
       this.pressedKey = id;
+      this.vibrate();
       action();
       if (repeat) {
         this.repeating = id;
@@ -456,34 +471,6 @@ struct KeyboardIndex {
         this.startPress('pinyin', e, () => {
           mixedController.onTogglePhysicalPinyin();
         }, false);
-      })
-  }
-
-  @Builder
-  DragHandle() {
-    Text('⠿')
-      .fontSize(18)
-      .fontColor(FG_TEXT)
-      .textAlign(TextAlign.Center)
-      .backgroundColor(this.keyBg(BG_FUNC, 'drag'))
-      .borderRadius(8)
-      .width(44)
-      .height('90%')
-      .margin({ left: 4, right: 4 })
-      .onTouch((e: TouchEvent) => {
-        if (e.type !== TouchType.Down) {
-          return;
-        }
-        const win = this.kbWindow;
-        if (win) {
-          win.startMoving().then(() => {
-            console.info('bar startMoving ok');
-          }).catch((err: BusinessError) => {
-            console.warn(`startMoving failed ${err.code}`);
-          });
-        } else {
-          this.refreshDockInset();
-        }
       })
   }
 
