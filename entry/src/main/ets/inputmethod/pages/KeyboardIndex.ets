@@ -30,6 +30,19 @@ const REPEAT_MS: number = 100;
 // neither places the panel above the dock nor reports it via avoid-area.
 // Tune this so the candidate bar sits just above the dock with no overlap.
 const DOCK_FALLBACK_VP: number = 40;
+// Collapsed (physical-keyboard) candidate strip geometry. The IME panel is
+// grown to STRIP_VP + STRIP_BAND_VP: the strip renders in the TOP STRIP_VP of
+// the window and the band underneath stays transparent + touch-passing. The
+// band must clear the 2-in-1 taskbar completely (SCBSmartDock window is
+// 125 px tall at density 1.9 => 66 vp), otherwise the strip overlaps it.
+const STRIP_VP: number = 60; // must match COLLAPSED_VP in MixedController.ets
+const STRIP_BAND_VP: number = 66; // >= taskbar window height (125 px @ 1.9)
+
+/** Anchor for a strip drag: pointer position and strip offset at touch-down. */
+interface StripAnchor {
+  x: number;
+  offset: number;
+}
 
 @Entry
 @Component
@@ -54,6 +67,12 @@ struct KeyboardIndex {
   private chipScroller: Scroller = new Scroller();
   // handle to the floating panel window, cached for moveWindowTo / startMoving
   private kbWindow: window.Window | undefined;
+  // horizontal offset (vp) of the candidate strip inside the transparent
+  // band; -1 = not yet placed (defaults to right-aligned)
+  @State stripOffsetVp: number = -1;
+  private stripAnchor: StripAnchor | undefined;
+  // collapsed-state latch for the one-shot dock-inset trigger
+  private collapsedSeen: boolean = false;
   // geometry key under which the floating bar was last auto-positioned, so a
   // user drag is not snapped back on every area-change callback
   private lastPlacedKey: string = '';
@@ -73,6 +92,13 @@ struct KeyboardIndex {
       this.physicalMode = physicalMode;
       this.physicalPinyin = pinyinOn;
       this.selCand = sel;
+      if (collapsed && (!this.collapsedSeen || !this.kbWindow)) {
+        this.collapsedSeen = true;
+        // (re)acquire the bar window handle: the IME process restarts on
+        // reinstall and the cached handle goes stale — without it the grip
+        // cannot start a system drag
+        this.setupDockAwareness();
+      }
       if (sel >= 0) {
         // keep the highlighted candidate visible (status chip occupies ListItem 0 when shown)
         const idx: number = sel + ((comp.length > 0 || predicting) ? 1 : 0);
@@ -100,35 +126,76 @@ struct KeyboardIndex {
     }, 50);
   }
 
+  /**
+   * Get a usable handle to the floating panel window. The page's own host
+   * context cannot see it (getLastWindow fails 1300002 in panel pages), so
+   * try the IME extension context first, then the host, then any window of
+   * the IME bundle.
+   */
+  private async acquireBarWindow(): Promise<window.Window | undefined> {
+    const ime = mixedController.getExtensionContext() as common.BaseContext | undefined;
+    const host = this.getUIContext().getHostContext() as common.BaseContext;
+    const candidates: (common.BaseContext | undefined)[] = [ime, host];
+    for (const ctx of candidates) {
+      if (!ctx) {
+        continue;
+      }
+      try {
+        const win = await window.getLastWindow(ctx);
+        console.info('dock: bar window via getLastWindow');
+        return win;
+      } catch (e) {
+        console.warn(`getLastWindow failed ${(e as BusinessError).code}`);
+      }
+    }
+    if (ime) {
+      // the panel window is named softKeyboard<N>; N increments every time
+      // the panel is re-created, so scan for a live one
+      for (let i = 1; i <= 9; i++) {
+        const n: string = `softKeyboard${i}`;
+        try {
+          const win = window.findWindow(n);
+          console.info(`dock: bar window via findWindow(${n})`);
+          return win;
+        } catch (e) {
+          // try the next candidate name
+        }
+      }
+    }
+    return undefined;
+  }
+
   private refreshDockInset(): void {
-    try {
-      const host: common.BaseContext | undefined =
-        this.getUIContext().getHostContext() as common.BaseContext;
-      if (!host) {
+    console.info(`refreshDockInset: collapsed=${this.collapsed} inset=${this.bottomInset}`);
+    if (this.collapsed) {
+      // FIXED panel windows are invisible to findWindow/getLastWindow, so no
+      // handle and no avoid-area query: use the fallback band directly. The
+      // window grows by it, the strip renders at the TOP (above the
+      // taskbar), and the taskbar zone stays transparent + touch-passing.
+      console.info('refreshDockInset: collapsed path, applying band');
+      if (Math.abs(STRIP_BAND_VP - this.bottomInset) >= 1) {
+        this.bottomInset = STRIP_BAND_VP;
+        mixedController.setBottomInset(STRIP_BAND_VP);
+      }
+      return;
+    }
+    this.acquireBarWindow().then((win: window.Window | undefined) => {
+      if (!win) {
+        console.warn('dock: no bar window found');
         return;
       }
-      window.getLastWindow(host).then((win: window.Window) => {
-        this.kbWindow = win;
-        const dis = display.getDefaultDisplaySync();
-        const dockPx: number = this.readDockPx(win);
-        if (this.collapsed) {
-          // floating bar: the whole window is positioned above the dock, so no
-          // in-window transparent inset is needed
-          this.bottomInset = 0;
-          this.positionFloatingBar(win, dis, dockPx);
-        } else {
-          const insetVp: number = px2vp(dockPx) > DOCK_FALLBACK_VP ? px2vp(dockPx) : DOCK_FALLBACK_VP;
-          if (Math.abs(insetVp - this.bottomInset) >= 1) {
-            this.bottomInset = insetVp;
-            mixedController.setBottomInset(insetVp);
-          }
+      this.kbWindow = win;
+      const dis = display.getDefaultDisplaySync();
+      const dockPx: number = this.readDockPx(win);
+      {
+
+        const insetVp: number = px2vp(dockPx) > DOCK_FALLBACK_VP ? px2vp(dockPx) : DOCK_FALLBACK_VP;
+        if (Math.abs(insetVp - this.bottomInset) >= 1) {
+          this.bottomInset = insetVp;
+          mixedController.setBottomInset(insetVp);
         }
-      }).catch((e: BusinessError) => {
-        console.warn(`dock getLastWindow failed ${e.code}`);
-      });
-    } catch (e) {
-      console.warn('refreshDockInset failed');
-    }
+      }
+    });
   }
 
   private readDockPx(win: window.Window): number {
@@ -137,42 +204,6 @@ struct KeyboardIndex {
     const sys: number =
       win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM).bottomRect.height;
     return nav > sys ? nav : sys;
-  }
-
-  /** Park the floating bar near the right edge, just above the dock. Waits
-   *  until the window has actually shrunk to the slim size, and runs once per
-   *  screen geometry so a manual drag is not snapped back. */
-  private positionFloatingBar(win: window.Window, dis: display.Display, dockPx: number): void {
-    const wr = win.getWindowProperties().windowRect;
-    if (wr.width > dis.width * 0.6) {
-      return; // window has not resized to the slim bar yet
-    }
-    const key: string = `${dis.width}x${dis.height}`;
-    if (this.lastPlacedKey === key) {
-      return;
-    }
-    this.lastPlacedKey = key;
-    const allow: number = dockPx > 20 ? dockPx : 72;
-    const left: number = Math.max(0, dis.width - wr.width - 16);
-    const top: number = Math.max(0, dis.height - allow - wr.height - 8);
-    win.moveWindowTo(left, top).then(() => {
-      console.info(`floating bar parked at ${left},${top}`);
-    }).catch((e: BusinessError) => {
-      console.warn(`moveWindowTo failed ${e.code}`);
-    });
-  }
-
-  /** Hand the bar to the system freeform mover (PC-mode window dragging). */
-  private startBarDrag(): void {
-    const win = this.kbWindow;
-    if (!win) {
-      return;
-    }
-    win.startMoving().then(() => {
-      console.info('bar startMoving ok');
-    }).catch((e: BusinessError) => {
-      console.warn(`startMoving failed ${e.code}`);
-    });
   }
 
   aboutToDisappear(): void {
@@ -407,7 +438,9 @@ struct KeyboardIndex {
       })
   }
 
-  /** Grip that hands the floating bar to the system freeform mover. */
+  /** Grip that drags the candidate strip along the band. Window moves are
+   * system-blocked for IME panels (moveWindowTo ignored; startMoving hides
+   * the panel), so the strip itself moves inside the transparent band. */
   @Builder
   DragHandle() {
     Text('⠿')
@@ -415,18 +448,39 @@ struct KeyboardIndex {
       .fontColor(FG_TEXT)
       .textAlign(TextAlign.Center)
       .backgroundColor(this.keyBg(BG_FUNC, 'drag'))
-      .borderRadius(6)
-      .width(30)
-      .height(36)
-      .margin({ left: 6, right: 4 })
+      .borderRadius(8)
+      .width(44)
+      .height('90%')
+      .margin({ left: 4, right: 4 })
       .onTouch((e: TouchEvent) => {
+        if (e.touches.length === 0) {
+          return;
+        }
+        const pt: TouchObject = e.touches[0];
         if (e.type === TouchType.Down) {
-          this.startBarDrag();
+          if (this.stripOffsetVp < 0) {
+            this.stripOffsetVp = this.maxStripOffsetVp();
+          }
+          this.stripAnchor = { x: pt.screenX, offset: this.stripOffsetVp };
+        } else if (e.type === TouchType.Move) {
+          const a = this.stripAnchor;
+          if (a) {
+            this.stripOffsetVp = Math.min(Math.max(0, a.offset + (pt.screenX - a.x)), this.maxStripOffsetVp());
+          }
+        } else if (e.type === TouchType.Up || e.type === TouchType.Cancel) {
+          this.stripAnchor = undefined;
         }
       })
   }
 
-  /** Slim bar while a physical keyboard is attached: grip + chips + ^ restore. */
+  private maxStripOffsetVp(): number {
+    const wVp: number = px2vp(display.getDefaultDisplaySync().width);
+    return Math.max(0, Math.floor(wVp * 0.6) - 8); // strip is 40% of the width
+  }
+
+  /** Candidate bar while a physical keyboard is attached: the strip only fills
+   * the TOP STRIP_VP of the panel window; the band below it is transparent and
+   * touch-passing so the 2-in-1 taskbar underneath stays visible and usable. */
   @Builder
   CollapsedBar() {
     Row() {
@@ -437,10 +491,15 @@ struct KeyboardIndex {
       }
       this.CollapseButton('^')
     }
-    .width('100%')
-    .height(56)
+    .width('40%')
+    .height(STRIP_VP)
     .backgroundColor(BG_BAR)
+    .borderRadius(16)
+    .border({ width: 1, color: '#C8CDD6' })
+    .padding({ left: 12, right: 8 })
     .alignItems(VerticalAlign.Center)
+    .hitTestBehavior(HitTestMode.Default)
+    .offset({ x: this.stripOffsetVp < 0 ? this.maxStripOffsetVp() : this.stripOffsetVp })
   }
 
   @Builder
@@ -627,14 +686,18 @@ struct KeyboardIndex {
 
   build() {
     if (this.collapsed) {
-      // slim floating candidate bar fills its freeform window; positioned above
-      // the dock and draggable via the grip handle
+      // slim candidate strip drawn inside the pinned full-width band: the
+      // band surface stays transparent and does NOT consume touches outside
+      // the strip, so the system dock underneath stays usable; the grip
+      // slides the strip horizontally inside the band
       Column() {
         this.CollapsedBar()
+        Blank().height(this.bottomInset)
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(BG_BAR)
+      .backgroundColor(Color.Transparent)
+      .hitTestBehavior(HitTestMode.None)
       .alignItems(HorizontalAlign.Start)
       .onAreaChange((_oldValue: Area, newValue: Area) => {
         const w: number = Number(newValue.width);

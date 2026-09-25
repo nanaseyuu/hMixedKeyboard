@@ -5,6 +5,12 @@ import inputDevice from '@ohos.multimodalInput.inputDevice';
 import { KeyEvent as PhysKeyEvent } from '@ohos.multimodalInput.keyEvent';
 import { Cand, dictEngine, LookupResult } from './DictEngine';
 
+/** Screen position (px) for the floating bar window. */
+export interface BarRect {
+  left: number;
+  top: number;
+}
+
 export type UiListener =
   (composition: string, candidates: Cand[], predicting: boolean, shift: boolean, rowHeight: number,
     expanded: boolean, collapsed: boolean, physicalMode: boolean, pinyinOn: boolean, sel: number) => void;
@@ -34,9 +40,6 @@ const EXPANDED_MIN_SHORT_AXIS_VP: number = 550;
 // and auto re-show if the bar ever gets hidden while an editor is attached.
 const PHYSICAL_KB_PIN_ENABLED: boolean = true;
 const COLLAPSED_VP: number = 60;
-// The physical-keyboard candidate bar is a slim freeform strip: one third of
-// the screen wide, draggable, parked just above the desktop dock.
-const COLLAPSED_WIDTH_FRACTION: number = 1 / 3;
 // physical key capture via KeyboardDelegate.on('keyEvent'): with the pad's
 // keyboard attached, typed letters build the pinyin composition and the
 // candidate bar offers Chinese, while Space/Backspace/Enter act on it.
@@ -64,7 +67,7 @@ class MixedController {
   // build identifier logged in onCreate: hilog "build <stamp>" proves which
   // bundle the LIVE service actually runs (install -r does not always
   // restart a running input-method service)
-  static readonly STAMP: string = 'floating-drag 2026-09-24';
+  static readonly STAMP: string = 'strip-above6 2026-09-25';
   private context: InputMethodExtensionContext | undefined;
   private panel: inputMethodEngine.Panel | undefined;
   private kbController: inputMethodEngine.KeyboardController | undefined;
@@ -74,9 +77,6 @@ class MixedController {
   private panelHeight: number = 0;
   private panelWidthPx: number = 0;
   private panelHeightPx: number = 0;
-  // width (px) of the slim floating candidate bar when a physical keyboard is
-  // attached (COLLAPSED_WIDTH_FRACTION of the screen width)
-  private collapsedWidthPx: number = 0;
   // full-screen panel width (px) for the expanded keyboard
   private fullWidthPx: number = 0;
   private densityPx: number = 1;
@@ -96,6 +96,7 @@ class MixedController {
   private relayoutTimer: number = -1;
   private lastMismatchSig: string = '';
   private resizeGiveups: number = 0;
+  private lastKeyLogAt: number = 0;
 
   private composition: string = '';
   private baseCands: Cand[] = [];
@@ -187,10 +188,20 @@ class MixedController {
    * pending composition, otherwise they pass through untouched.
    */
   private onPhysicalKeyEvent(ev: PhysKeyEvent): boolean {
-    if (ev.action !== KEY_ACTION_PRESS || !this.inputClient) {
+    if (ev.action !== KEY_ACTION_PRESS) {
       return false;
     }
     const code: number = ev.key.code as number;
+    // burst-gated diagnostics: proves whether physical keys reach the IME at
+    // all (e.g. PC-compat container apps may bypass the keyboard delegate)
+    const now: number = Date.now();
+    if (now - this.lastKeyLogAt > 2000) {
+      this.lastKeyLogAt = now;
+      console.info(`${TAG} physKey code=${code} ctrl=${ev.ctrlKey} pinyin=${this.physicalPinyin} hasClient=${this.inputClient !== undefined} physicalKb=${this.physicalKbActive}`);
+    }
+    if (!this.inputClient) {
+      return false;
+    }
     // Ctrl+Space toggles 漢/EN in both directions (checked before the EN
     // pass-through, otherwise EN mode could never be left again)
     if (ev.ctrlKey && !ev.altKey && code === KC_SPACE) {
@@ -292,6 +303,11 @@ class MixedController {
   /** true = only the candidate bar should be shown (physical keyboard in use) */
   public isCollapsed(): boolean {
     return this.physicalKbActive && !this.kbExpanded;
+  }
+
+  /** The extension context that owns the panel window (for window lookups). */
+  public getExtensionContext(): InputMethodExtensionContext | undefined {
+    return this.context;
   }
 
   public onCreate(context: InputMethodExtensionContext): void {
@@ -399,7 +415,6 @@ class MixedController {
     this.densityPx = density;
     this.panelWidthPx = Math.round(this.panelWidth * density);
     this.fullWidthPx = this.panelWidthPx;
-    this.collapsedWidthPx = Math.round(this.panelWidth * COLLAPSED_WIDTH_FRACTION * density);
     this.applyPanelSize();
     console.info(`${TAG} applyLayout: ${dis.width}x${dis.height} rot${dis.rotation} d${density} ${isLandscape ? 'landscape' : 'portrait'} ${isPhoneLandscape ? 'phone-landscape ' : ''}width ${Math.floor(widthPt)}pt row ${this.rowHeight}pt panel ${this.panelWidth}x${this.panelHeight}vp (${this.panelWidthPx}x${this.panelHeightPx}px)`);
   }
@@ -409,17 +424,25 @@ class MixedController {
    * candidate bar while a physical keyboard is attached.
    */
   private applyPanelSize(): void {
-    if (this.isCollapsed()) {
-      // floating candidate bar: slim width, no dock inset (the page positions
-      // the whole freeform window above the dock and lets the user drag it)
-      this.panelWidthPx = this.collapsedWidthPx;
-      this.panelWidth = this.collapsedWidthPx / this.densityPx;
-      this.panelHeight = COLLAPSED_VP;
-    } else {
-      this.panelWidthPx = this.fullWidthPx;
-      this.panelWidth = this.fullWidthPx / this.densityPx;
-      this.panelHeight = this.basePanelHeight + this.bottomInset;
-    }
+    // One system-pinned FLG_FIXED panel for both modes: the full keyboard
+    // fills it, and the physical-keyboard candidate bar is a slim strip drawn
+    // inside a transparent full-width window. The WM silently IGNORES
+    // moveWindowTo/startMoving on IME panels (verified on the 2-in-1: the
+    // call resolves but the window rect never changes), so the window itself
+    // is never moved; the strip slides inside it instead.
+    // collapsed = slim full-width band; the page draws the visible candidate
+    // strip inside it and (if the surface allows transparency) only the strip
+    // is visible. FLG_FIXED both modes: panel moves are system-blocked
+    // (moveWindowTo ignored, startMoving hides the panel), so the window
+    // never moves and never needs the floating flag.
+    this.panelWidthPx = this.fullWidthPx;
+    this.panelWidth = this.fullWidthPx / this.densityPx;
+    // collapsed: strip height + the taskbar/dock inset, so the visible strip
+    // sits ABOVE the taskbar and only a transparent, touch-passing zone
+    // covers the taskbar itself
+    this.panelHeight = this.isCollapsed()
+      ? COLLAPSED_VP + this.bottomInset
+      : this.basePanelHeight + this.bottomInset;
     this.panelHeightPx = Math.round(this.panelHeight * this.densityPx);
     if (this.panel && this.panelShown) {
       this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1);
@@ -530,13 +553,26 @@ class MixedController {
       return;
     }
     this.applyLayout();
+    this.setupPanel();
+  }
+
+  /**
+   * Create the panel with the window semantics the current mode needs.
+   * FLG_FIXED: the system pins the full keyboard to the screen bottom.
+   * FLG_FLOATING: the slim candidate bar — the WM honours its RESIZE (1/3
+   * screen width works) but pins it top-left and ignores moveWindowTo, so
+   * the page re-creates nothing; the bar's x-position is instead chosen by
+   * re-creating the panel is NOT needed — the page now offsets the CONTENT
+   * inside the transparent full-height strip... (simplified: bar drawn
+   * top-right by the page inside the floating window).
+   */
+  private setupPanel(): void {
+    if (!this.context) {
+      return;
+    }
     const panelInfo: inputMethodEngine.PanelInfo = {
       type: inputMethodEngine.PanelType.SOFT_KEYBOARD,
-      // FLG_FLOATING: on 2-in-1 the panel is a freeform window the page can
-      // reposition (moveWindowTo) and drag (startMoving). This is what lets
-      // the slim candidate bar sit above the desktop dock instead of being
-      // system-pinned to the screen bottom.
-      flag: inputMethodEngine.PanelFlag.FLG_FLOATING
+      flag: inputMethodEngine.PanelFlag.FLG_FIXED
     };
     inputMethodEngine.getInputMethodAbility().createPanel(this.context, panelInfo)
       .then((panel: inputMethodEngine.Panel) => {
@@ -573,9 +609,16 @@ class MixedController {
             }
           });
           console.info(`${TAG} panel initial hide`);
-          return this.panel.hide().then(() => {
+          return kb.hide().then(() => {
             console.info(`${TAG} panel hidden, resizing`);
             return this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1);
+          }).then(() => {
+            if (this.inputClient) {
+              // mid-session panel re-creation: bring the keyboard back
+              kb.show().catch((err: BusinessError) => {
+                console.error(`${TAG} re-show failed: ${err.code}`);
+              });
+            }
           }).catch((err: BusinessError) => {
             console.error(`${TAG} panel hide failed: code ${err.code}`);
             return this.resizeWithRetry(this.panelWidthPx, this.panelHeightPx, 1);
@@ -584,7 +627,7 @@ class MixedController {
         return Promise.resolve();
       })
       .catch((err: BusinessError) => {
-        console.error(`${TAG} initWindow failed: code ${err.code} msg ${err.message}`);
+        console.error(`${TAG} setupPanel failed: code ${err.code} msg ${err.message}`);
       });
   }
 
@@ -677,19 +720,36 @@ class MixedController {
    * inputDevice change events need no permission; getKeyboardTypeSync tells
    * real alphabetic/numeric keyboards apart from virtual inputs.
    */
+  /**
+   * True only for real external keyboards. keyboardType alone is not enough:
+   * Bluetooth peripherals like a paired watch expose a HID "consumer control"
+   * interface that reports ALPHABETIC_KEYBOARD, which wrongly collapsed the
+   * panel to the candidate bar whenever the watch was connected. A physical
+   * keyboard additionally advertises the 'keyboard' input source.
+   */
+  private isRealKeyboard(deviceId: number): boolean {
+    try {
+      const dev: inputDevice.InputDeviceData = inputDevice.getDeviceInfoSync(deviceId);
+      const kt: number = inputDevice.getKeyboardTypeSync(deviceId);
+      const hasKbSource: boolean = dev.sources !== undefined && dev.sources.indexOf('keyboard') >= 0;
+      // "Consumer Control" is the standard HID top-level-collection name for
+      // media-control interfaces on watches/headsets — such interfaces can
+      // claim the keyboard source and an alphabetic type, so exclude them
+      const companion: boolean = /consumer control/i.test(dev.name);
+      console.info(`${TAG} device ${deviceId} name="${dev.name}" kbType=${kt} sources=${JSON.stringify(dev.sources)} virtual=${dev.isVirtual}`);
+      return !dev.isVirtual && !companion && hasKbSource
+        && (kt === inputDevice.KeyboardType.ALPHABETIC_KEYBOARD
+          || kt === inputDevice.KeyboardType.DIGITAL_KEYBOARD);
+    } catch (e) {
+      const be = e as BusinessError;
+      console.warn(`${TAG} device ${deviceId} info unavailable: ${be.code}`);
+      return false;
+    }
+  }
+
   private registerDeviceListener(): void {
     inputDevice.on('change', (d: inputDevice.DeviceListener) => {
-      let kbType: number = -1;
-      try {
-        kbType = inputDevice.getKeyboardTypeSync(d.deviceId);
-      } catch (e) {
-        const be = e as BusinessError;
-        console.warn(`${TAG} device ${d.deviceId} kb type unavailable: ${be.code}`);
-        return;
-      }
-      const physical: boolean = kbType === inputDevice.KeyboardType.ALPHABETIC_KEYBOARD
-        || kbType === inputDevice.KeyboardType.DIGITAL_KEYBOARD;
-      console.info(`${TAG} device ${d.type} id=${d.deviceId} kbType=${kbType} physical=${physical}`);
+      const physical: boolean = this.isRealKeyboard(d.deviceId);
       if (!physical) {
         return;
       }
@@ -712,14 +772,8 @@ class MixedController {
     return inputDevice.getDeviceList().then((ids: number[]) => {
       let count: number = 0;
       for (let i = 0; i < ids.length; i++) {
-        try {
-          const kt: number = inputDevice.getKeyboardTypeSync(ids[i]);
-          if (kt === inputDevice.KeyboardType.ALPHABETIC_KEYBOARD
-            || kt === inputDevice.KeyboardType.DIGITAL_KEYBOARD) {
-            count++;
-          }
-        } catch (e) {
-          // device vanished between listing and query
+        if (this.isRealKeyboard(ids[i])) {
+          count++;
         }
       }
       console.info(`${TAG} scanPhysicalKeyboard: ${count} physical keyboard(s)`);

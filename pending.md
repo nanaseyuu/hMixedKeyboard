@@ -36,3 +36,80 @@ sends raw English; arrow keys navigate a highlight (incl. the un-numbered
 raw chip, auto-scrolled into view) that Space/Enter commits. 漢/EN button in
 the collapsed bar hands the keys back to the app for plain English typing.
 Verified on MatePad Edge and Mate XTS.
+
+## 5. Candidate selection via a separate toolbar window instead of the IME panel  — pending
+Background: the IME soft-keyboard panel window is heavily restricted by the
+system — `moveWindowTo` is silently ignored, `startMoving` hides the panel,
+`FLG_FIXED` windows are clamped to full screen width. The current candidate
+strip therefore lives inside a full-width transparent band pinned to the
+bottom edge, and can only slide horizontally.
+Idea: stop insisting on the keyboard panel for candidate selection. Create a
+SEPARATE window (e.g. `window.createWindow` with a freeform/float type from
+the IME extension context) whose only job is showing candidates + selection.
+A plain floating window is not bound by soft-keyboard panel rules, so it
+could be freely draggable in 2D and positioned anywhere. The IME panel would
+then only render the full keyboard (or nothing, when a physical keyboard is
+attached). Open questions: can an IME extension create and show arbitrary
+windows (permission/system restrictions), z-order vs. the app in focus, and
+touch routing when it overlaps app content.
+Feasibility note: estimated ~30% — floating windows above other apps'
+content normally require the system-grade `SYSTEM_FLOAT_WINDOW` permission
+that third-party apps don't get. Worth a one-hour spike: attempt one
+`createWindow` (float type) from the extension context and read the
+permission error. If denied, the current in-band strip stands.
+
+## 6. Container apps (EasyAbroad / droitong): input bridging via an APK helper  — pending
+Problem: Android-compat containers (EasyAbroad, droitong) double-deliver
+physical keystrokes — the keys reach our IME (composition builds, candidates
+show) but the container ALSO injects the raw English into the focused editor,
+so Chinese cannot be typed with the physical keyboard inside those apps.
+Idea A: ship a small companion APK that runs INSIDE the container as an
+Android accessibility service (or local input method). It would capture
+keystrokes/targeted edit fields in container apps, forward them to the
+HarmonyOS side (localhost socket / intent bridge), receive back the committed
+Chinese text, and write it into the field — effectively an input bridge that
+suppresses the container's own raw-key path.
+Idea B (fallback if A is infeasible): a native Android keyboard app running
+inside the container only, sharing the same dictionary/engine (the MCK
+dictionary format is pure data, so the parsing logic could be ported or the
+HarmonyOS side could serve lookups over the local bridge).
+Open questions: can a container-side service suppress the container's key
+delivery; is cross-environment networking (HarmonyOS host ↔ Android
+container) allowed on localhost; does EasyAbroad permit installing helper
+APKs with accessibility privileges.
+Feasibility note: ~50% and a real project (a full Android app). The
+double-delivery we observed suggests the container bypasses Android's input
+framework — which is also what would defeat the helper's key filtering.
+Try item 7 (delete-back fix) and item 5's spike before committing to this.
+Documented workaround for now: tap `^` on the candidate bar to expand the
+full on-screen keyboard and tap-type Chinese — that path works in container
+apps (verified on Mate XTS).
+
+## 7. Container fix, cheap attempt: delete-back-then-commit  — pending
+Keys DO reach our IME inside container apps (composition builds; commits
+work). The only defect is the container ALSO typing the raw letters into the
+editor. So: let them land. While composing with a physical keyboard in a
+container app, count the raw characters the editor received; when a candidate
+is committed, delete that many characters back (the selectByRange+CUT /
+deleteBackward strategies already work — see the backspace fix) and only then
+insert the Chinese text. ~20 lines in the existing app instead of an APK
+project. Might fail if the container ignores our deletes the way it ignores
+key consumption — an afternoon to find out. Try this BEFORE item 6.
+
+## 8. Ship the remaining bar work  — pending
+The strip-above-taskbar build (window grown by the dock inset, transparent
+touch-passing zone over the taskbar, stamp `strip-above5`) is in the source
+but was NEVER verified on device: deploys silently failed (see below) and the
+device kept running an older build. Still to do: verify deploy (check the
+`onCreate enter — build <stamp>` log line and that the softKeyboard window is
+~190px tall with the strip in its top part), finger-test taskbar clicks
+through the transparent zone, redeploy the same build to the Mate XTS, then
+commit and push the two modified files (MixedController.ets,
+KeyboardIndex.ets) plus this file.
+Deploy lesson: always show `hdc file send` output — piped-to-/dev/null
+transfers failed silently and `bm install` kept installing a stale
+/data/local/tmp/hmk.hap. Always verify the running build via the STAMP log
+line. The hilog buffer churns in ~10s: stream `hilog` to a local file in the
+background instead of snapshotting. Heavy install churn once flipped the IME
+to BASIC_MODE (recovered via switch to Celia → force-stop ours → `ime -e` →
+`ime -s`).

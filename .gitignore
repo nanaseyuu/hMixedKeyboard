@@ -44,3 +44,7 @@ build-profile.json5
 
 # transient unsigned-copy of build-profile used by cli_build.bat (contains signing material)
 build-profile.local.json5
+
+# local diagnostic / verification artifacts from device testing
+.diag/
+.verify/
